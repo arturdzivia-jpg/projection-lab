@@ -1,4 +1,4 @@
-export type ProjectionId = 'equirectangular' | 'mercator' | 'lambert';
+export type ProjectionId = 'equirectangular' | 'mercator' | 'lambert' | 'hemispheres';
 
 export interface Projection {
   id: ProjectionId;
