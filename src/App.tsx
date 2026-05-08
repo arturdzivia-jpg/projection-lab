@@ -156,7 +156,7 @@ function App() {
     return (
       <div className="upload-screen">
         <header className="upload-screen__header">
-          <h1>Map Projector</h1>
+          <h1>Projection Lab</h1>
           <p>Convert map images between projections.</p>
         </header>
         <Uploader
@@ -174,7 +174,7 @@ function App() {
     <div className="app">
       <aside className={`sidebar ${sidebarOpen ? '' : 'sidebar--collapsed'}`}>
         <div className="sidebar__head">
-          {sidebarOpen && <span className="sidebar__title">Map Projector</span>}
+          {sidebarOpen && <span className="sidebar__title">Projection Lab</span>}
           <button
             className="sidebar__toggle"
             onClick={() => setSidebarOpen((v) => !v)}
