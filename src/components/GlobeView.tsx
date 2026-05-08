@@ -48,11 +48,11 @@ export function GlobeView({ equirectangular }: Props) {
     scene.add(sphere);
 
     const applySize = () => {
-      const w = container.clientWidth;
-      const h = container.clientHeight;
-      const size = Math.max(64, Math.min(w, h));
-      renderer.setSize(size, size, false);
-      // The renderer's canvas is square — center it inside the container via CSS in the parent.
+      const w = Math.max(64, container.clientWidth);
+      const h = Math.max(64, container.clientHeight);
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
     };
     applySize();
 
