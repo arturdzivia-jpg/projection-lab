@@ -3,23 +3,30 @@ import type { Projection } from './types';
 const HALF_PI = Math.PI / 2;
 
 /**
- * Twin orthographic ("double hemispheres") projection — the classic atlas layout that
- * shows the world as two side-by-side circles, each an orthographic view of a hemisphere
- * from infinity. Closest 2-D approximation of "looking at a real globe".
+ * Twin equatorial orthographic projection — two side-by-side orthographic hemispheres,
+ * each viewed as if from infinity (the limit case of vertical perspective). Classic
+ * world-map layout used since the 16th century (e.g. Rumold Mercator 1587).
+ *
+ * Per-disk math (azimuthal orthographic, equatorial aspect, φ₀ = 0):
+ *   x = cos(φ) · sin(λ − λ₀)
+ *   y = sin(φ)
+ * Inverse:
+ *   φ = arcsin(y)
+ *   λ = λ₀ + atan2(x, √(1 − x² − y²))
  *
  * Layout (aspect 2:1):
- *   - Left disk:  Western hemisphere, centred at lon = -90°, lat = 0° (lon ∈ [-180°, 0°])
- *   - Right disk: Eastern hemisphere, centred at lon = +90°, lat = 0° (lon ∈ [0°, +180°])
+ *   - Left disk:  λ₀ = −90°  (Western hemisphere, λ ∈ [−180°, 0°])
+ *   - Right disk: λ₀ = +90°  (Eastern hemisphere, λ ∈ [0°, +180°])
  *
  * Pixels outside either disk lie outside the projection's domain and are rendered transparent.
  */
-export const hemispheres: Projection = {
-  id: 'hemispheres',
-  label: 'Double hemispheres',
+export const orthographicTwin: Projection = {
+  id: 'orthographicTwin',
+  label: 'Orthographic (twin hemispheres)',
   defaultAspect: 2,
 
   glsl: `
-    vec2 inverse_hemispheres(vec2 uv) {
+    vec2 inverse_orthographicTwin(vec2 uv) {
       bool right = uv.x >= 0.5;
       float lon0 = right ? HALF_PI : -HALF_PI;
       // Local hemisphere coordinates: x ∈ [-1, 1] across the inscribed disk, y north-positive.
@@ -32,12 +39,11 @@ export const hemispheres: Projection = {
       return vec2(lon, lat);
     }
 
-    vec2 forward_hemispheres(vec2 lonlat) {
+    vec2 forward_orthographicTwin(vec2 lonlat) {
       // Hemisphere chosen by sign of lon — the seam at lon = 0° lines up at the disk boundary.
       bool right = lonlat.x > 0.0;
       float lon0 = right ? HALF_PI : -HALF_PI;
       float dLon = lonlat.x - lon0;
-      // Orthographic forward at lat0 = 0: x = cos(lat)·sin(dLon), y = sin(lat).
       float x = cos(lonlat.y) * sin(dLon);
       float y = sin(lonlat.y);
       float u = right ? (x * 0.25 + 0.75) : (x * 0.25 + 0.25);

@@ -2,16 +2,24 @@ import type { Projection, ProjectionId } from './types';
 import { equirectangular } from './equirectangular';
 import { mercator } from './mercator';
 import { lambert } from './lambert';
-import { hemispheres } from './hemispheres';
+import { orthographicTwin } from './orthographicTwin';
+import { stereographicTwin } from './stereographicTwin';
 
 export const projections: Record<ProjectionId, Projection> = {
   equirectangular,
   mercator,
   lambert,
-  hemispheres,
+  orthographicTwin,
+  stereographicTwin,
 };
 
-export const projectionList: Projection[] = [equirectangular, mercator, lambert, hemispheres];
+export const projectionList: Projection[] = [
+  equirectangular,
+  mercator,
+  lambert,
+  orthographicTwin,
+  stereographicTwin,
+];
 
 export function getProjection(id: ProjectionId): Projection {
   return projections[id];
