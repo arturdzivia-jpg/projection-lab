@@ -37,6 +37,17 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [downloadOpen, setDownloadOpen] = useState<boolean>(false);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
+  const [fullscreen, setFullscreen] = useState<'source' | 'target' | 'globe' | null>(null);
+
+  // Esc exits fullscreen.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFullscreen(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [fullscreen]);
 
   // Pan handler shared by source + target previews. `dx` and `dy` are mouse deltas as fractions of the
   // canvas display dimensions. Drag right decreases central longitude (content slides right under the
@@ -171,7 +182,7 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${fullscreen ? 'app--fullscreen' : ''}`}>
       <aside className={`sidebar ${sidebarOpen ? '' : 'sidebar--collapsed'}`}>
         <div className="sidebar__head">
           {sidebarOpen && <span className="sidebar__title">Projection Lab</span>}
@@ -445,13 +456,31 @@ function App() {
         {error && <div className="error">{error}</div>}
 
         <div className="panels">
-          <Panel title={`Source · ${sourceProjection.label}`} subtitle={filename}>
+          <Panel
+            id="source"
+            title={`Source · ${sourceProjection.label}`}
+            subtitle={filename}
+            fullscreen={fullscreen === 'source'}
+            onFullscreenToggle={() => setFullscreen(fullscreen === 'source' ? null : 'source')}
+          >
             <CanvasView canvas={sourcePreview} onPan={regionalActive ? undefined : handlePan} />
           </Panel>
-          <Panel title={`Target · ${targetProjection.label}`}>
+          <Panel
+            id="target"
+            title={`Target · ${targetProjection.label}`}
+            fullscreen={fullscreen === 'target'}
+            onFullscreenToggle={() => setFullscreen(fullscreen === 'target' ? null : 'target')}
+          >
             <CanvasView canvas={targetCanvas} onPan={regionalActive ? undefined : handlePan} />
           </Panel>
-          <Panel title="Globe view" subtitle="Drag to rotate · scroll to zoom" wide>
+          <Panel
+            id="globe"
+            title="Globe view"
+            subtitle="Drag to rotate · scroll to zoom"
+            wide
+            fullscreen={fullscreen === 'globe'}
+            onFullscreenToggle={() => setFullscreen(fullscreen === 'globe' ? null : 'globe')}
+          >
             <GlobeView equirectangular={globeCanvas} />
           </Panel>
         </div>
@@ -518,19 +547,34 @@ function Panel({
   subtitle,
   children,
   wide,
+  fullscreen,
+  onFullscreenToggle,
 }: {
+  id: string;
   title: string;
   subtitle?: string;
   children: React.ReactNode;
   wide?: boolean;
+  fullscreen: boolean;
+  onFullscreenToggle: () => void;
 }) {
   return (
-    <section className={`panel ${wide ? 'panel--wide' : ''}`}>
+    <section
+      className={`panel ${wide ? 'panel--wide' : ''} ${fullscreen ? 'panel--fullscreen' : ''}`}
+    >
       <header className="panel__header">
         <div>
           <h2>{title}</h2>
           {subtitle && <p className="panel__sub">{subtitle}</p>}
         </div>
+        <button
+          className="panel__fs"
+          onClick={onFullscreenToggle}
+          aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+          title={fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
+        >
+          {fullscreen ? '✕' : '⛶'}
+        </button>
       </header>
       <div className="panel__body">{children}</div>
     </section>
@@ -546,19 +590,36 @@ function CanvasView({
   onPan?: (dx: number, dy: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const onPanRef = useRef(onPan);
+  // Visual zoom state. Pure CSS transform on the canvas — independent of projection params.
+  // tx/ty are translations from the canvas's centred (untransformed) position, in screen pixels.
+  const scaleRef = useRef(1);
+  const txRef = useRef(0);
+  const tyRef = useRef(0);
+
   useEffect(() => {
     onPanRef.current = onPan;
   }, [onPan]);
+
+  const applyTransform = useCallback(() => {
+    const c = canvasRef.current;
+    if (c) {
+      c.style.transform = `translate(${txRef.current}px, ${tyRef.current}px) scale(${scaleRef.current})`;
+    }
+  }, []);
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     host.replaceChildren();
+    canvasRef.current = canvas;
     if (canvas) {
       canvas.style.maxWidth = '100%';
       canvas.style.maxHeight = '100%';
       canvas.style.objectFit = 'contain';
+      canvas.style.transformOrigin = '50% 50%';
+      canvas.style.transform = `translate(${txRef.current}px, ${tyRef.current}px) scale(${scaleRef.current})`;
       host.appendChild(canvas);
     }
   }, [canvas]);
@@ -583,8 +644,11 @@ function CanvasView({
       if (!dragging || !onPanRef.current) return;
       const rect = host.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
-      const dx = (e.clientX - lastX) / rect.width;
-      const dy = (e.clientY - lastY) / rect.height;
+      // Divide by current zoom so a fixed screen-pixel drag rotates the world by the same amount
+      // regardless of magnification — drag feels consistent at every zoom level.
+      const s = scaleRef.current;
+      const dx = (e.clientX - lastX) / rect.width / s;
+      const dy = (e.clientY - lastY) / rect.height / s;
       lastX = e.clientX;
       lastY = e.clientY;
       onPanRef.current(dx, dy);
@@ -603,6 +667,50 @@ function CanvasView({
       window.removeEventListener('mouseup', onUp);
     };
   }, []);
+
+  // Wheel zoom centred on the cursor. Scale stays in [1, 8]; at 1× translation snaps back to 0.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = host.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const oldS = scaleRef.current;
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const newS = Math.max(1, Math.min(8, oldS * factor));
+      if (newS === oldS) return;
+      const r = newS / oldS;
+      // Keep the content point under the cursor fixed when zooming.
+      txRef.current = (e.clientX - cx) * (1 - r) + txRef.current * r;
+      tyRef.current = (e.clientY - cy) * (1 - r) + tyRef.current * r;
+      if (newS === 1) {
+        txRef.current = 0;
+        tyRef.current = 0;
+      }
+      scaleRef.current = newS;
+      applyTransform();
+    };
+    host.addEventListener('wheel', onWheel, { passive: false });
+    return () => host.removeEventListener('wheel', onWheel);
+  }, [applyTransform]);
+
+  // Double-click resets zoom to 1×.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const onDbl = (e: MouseEvent) => {
+      if (scaleRef.current === 1 && txRef.current === 0 && tyRef.current === 0) return;
+      e.preventDefault();
+      scaleRef.current = 1;
+      txRef.current = 0;
+      tyRef.current = 0;
+      applyTransform();
+    };
+    host.addEventListener('dblclick', onDbl);
+    return () => host.removeEventListener('dblclick', onDbl);
+  }, [applyTransform]);
 
   return (
     <div

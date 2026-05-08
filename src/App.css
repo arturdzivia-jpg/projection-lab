@@ -287,6 +287,33 @@ select:disabled {
   font-size: 11px;
   color: var(--text);
 }
+.panel__fs {
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.panel__fs:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Fullscreen mode: the active panel covers the viewport, sidebar and other panels are hidden. */
+.app--fullscreen .sidebar { display: none; }
+.app--fullscreen .panel:not(.panel--fullscreen) { display: none; }
+.panel--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  border-radius: 0;
+  border: none;
+}
 .panel__body {
   flex: 1;
   min-height: 0;
