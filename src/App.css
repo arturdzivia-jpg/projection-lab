@@ -339,11 +339,11 @@ select:disabled {
   max-height: 100%;
   object-fit: contain;
 }
-.canvas-host--pannable {
+.canvas-host--zoomed {
   cursor: grab;
   user-select: none;
 }
-.canvas-host--pannable canvas {
+.canvas-host--zoomed canvas {
   pointer-events: none;
 }
 .canvas-host--grabbing {

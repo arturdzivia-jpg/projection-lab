@@ -49,14 +49,6 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [fullscreen]);
 
-  // Pan handler shared by source + target previews. `dx` and `dy` are mouse deltas as fractions of the
-  // canvas display dimensions. Drag right decreases central longitude (content slides right under the
-  // fixed grid). Drag down increases central latitude (north tilts toward centre). The grid stays put.
-  const handlePan = useCallback((dx: number, dy: number) => {
-    if (dx !== 0) setLonShift((s) => normalizeLon(s - dx * 360));
-    if (dy !== 0) setLatShift((s) => clamp(s + dy * 180, -90, 90));
-  }, []);
-
   const sourceProjection = getProjection(sourceId);
   const targetProjection = getProjection(targetId);
   const regionalActive = isRegional(sourceId) || isRegional(targetId);
@@ -463,7 +455,7 @@ function App() {
             fullscreen={fullscreen === 'source'}
             onFullscreenToggle={() => setFullscreen(fullscreen === 'source' ? null : 'source')}
           >
-            <CanvasView canvas={sourcePreview} onPan={regionalActive ? undefined : handlePan} />
+            <CanvasView canvas={sourcePreview} />
           </Panel>
           <Panel
             id="target"
@@ -471,7 +463,7 @@ function App() {
             fullscreen={fullscreen === 'target'}
             onFullscreenToggle={() => setFullscreen(fullscreen === 'target' ? null : 'target')}
           >
-            <CanvasView canvas={targetCanvas} onPan={regionalActive ? undefined : handlePan} />
+            <CanvasView canvas={targetCanvas} />
           </Panel>
           <Panel
             id="globe"
@@ -581,33 +573,38 @@ function Panel({
   );
 }
 
-function CanvasView({
-  canvas,
-  onPan,
-}: {
-  canvas: HTMLCanvasElement | null;
-  // Reports each mousemove as (dx, dy) where each is the delta normalized by host display dimensions.
-  onPan?: (dx: number, dy: number) => void;
-}) {
+function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const onPanRef = useRef(onPan);
-  // Visual zoom state. Pure CSS transform on the canvas — independent of projection params.
-  // tx/ty are translations from the canvas's centred (untransformed) position, in screen pixels.
+  // Visual zoom state. Pure CSS transform on the canvas — does not affect projection params.
+  // tx/ty are screen-pixel translations from the canvas's natural (centred) position.
   const scaleRef = useRef(1);
   const txRef = useRef(0);
   const tyRef = useRef(0);
 
-  useEffect(() => {
-    onPanRef.current = onPan;
-  }, [onPan]);
+  // Clamp tx/ty so the canvas always covers the host (you can't drag the content fully off-screen).
+  const clampPan = useCallback(() => {
+    const c = canvasRef.current;
+    const host = hostRef.current;
+    if (!c || !host) return;
+    const s = scaleRef.current;
+    const maxTx = Math.max(0, (c.offsetWidth * s - host.clientWidth) / 2);
+    const maxTy = Math.max(0, (c.offsetHeight * s - host.clientHeight) / 2);
+    txRef.current = Math.max(-maxTx, Math.min(maxTx, txRef.current));
+    tyRef.current = Math.max(-maxTy, Math.min(maxTy, tyRef.current));
+  }, []);
 
   const applyTransform = useCallback(() => {
+    clampPan();
     const c = canvasRef.current;
     if (c) {
       c.style.transform = `translate(${txRef.current}px, ${tyRef.current}px) scale(${scaleRef.current})`;
     }
-  }, []);
+    const host = hostRef.current;
+    if (host) {
+      host.classList.toggle('canvas-host--zoomed', scaleRef.current > 1);
+    }
+  }, [clampPan]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -621,9 +618,12 @@ function CanvasView({
       canvas.style.transformOrigin = '50% 50%';
       canvas.style.transform = `translate(${txRef.current}px, ${tyRef.current}px) scale(${scaleRef.current})`;
       host.appendChild(canvas);
+      host.classList.toggle('canvas-host--zoomed', scaleRef.current > 1);
     }
   }, [canvas]);
 
+  // Drag = visual pan. Only active when zoomed in (otherwise the canvas already fits the host
+  // and panning would just slide it into the empty checker background).
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -633,7 +633,7 @@ function CanvasView({
     let lastY = 0;
 
     const onDown = (e: MouseEvent) => {
-      if (!onPanRef.current) return;
+      if (scaleRef.current <= 1) return;
       dragging = true;
       lastX = e.clientX;
       lastY = e.clientY;
@@ -641,17 +641,12 @@ function CanvasView({
       e.preventDefault();
     };
     const onMove = (e: MouseEvent) => {
-      if (!dragging || !onPanRef.current) return;
-      const rect = host.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
-      // Divide by current zoom so a fixed screen-pixel drag rotates the world by the same amount
-      // regardless of magnification — drag feels consistent at every zoom level.
-      const s = scaleRef.current;
-      const dx = (e.clientX - lastX) / rect.width / s;
-      const dy = (e.clientY - lastY) / rect.height / s;
+      if (!dragging) return;
+      txRef.current += e.clientX - lastX;
+      tyRef.current += e.clientY - lastY;
       lastX = e.clientX;
       lastY = e.clientY;
-      onPanRef.current(dx, dy);
+      applyTransform();
     };
     const onUp = () => {
       if (dragging) host.classList.remove('canvas-host--grabbing');
@@ -666,7 +661,7 @@ function CanvasView({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, []);
+  }, [applyTransform]);
 
   // Wheel zoom centred on the cursor. Scale stays in [1, 8]; at 1× translation snaps back to 0.
   useEffect(() => {
@@ -682,7 +677,6 @@ function CanvasView({
       const newS = Math.max(1, Math.min(8, oldS * factor));
       if (newS === oldS) return;
       const r = newS / oldS;
-      // Keep the content point under the cursor fixed when zooming.
       txRef.current = (e.clientX - cx) * (1 - r) + txRef.current * r;
       tyRef.current = (e.clientY - cy) * (1 - r) + tyRef.current * r;
       if (newS === 1) {
@@ -696,7 +690,7 @@ function CanvasView({
     return () => host.removeEventListener('wheel', onWheel);
   }, [applyTransform]);
 
-  // Double-click resets zoom to 1×.
+  // Double-click resets zoom and pan.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -712,12 +706,7 @@ function CanvasView({
     return () => host.removeEventListener('dblclick', onDbl);
   }, [applyTransform]);
 
-  return (
-    <div
-      className={`canvas-host ${onPan ? 'canvas-host--pannable' : ''}`}
-      ref={hostRef}
-    />
-  );
+  return <div className="canvas-host" ref={hostRef} />;
 }
 
 function DownloadDialog({
