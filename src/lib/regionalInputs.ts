@@ -97,6 +97,28 @@ export function reorderInput(
   return next;
 }
 
+/**
+ * Move `id` to occupy position `targetIndex` in the list (insert before whatever is there).
+ * Used by drag-and-drop reordering, where the drop target is identified by index.
+ */
+export function moveInputToIndex(
+  list: RegionalInput[],
+  id: string,
+  targetIndex: number
+): RegionalInput[] {
+  const idx = list.findIndex((i) => i.id === id);
+  if (idx < 0) return list;
+  const clamped = Math.max(0, Math.min(list.length, targetIndex));
+  if (idx === clamped || idx + 1 === clamped) return list; // no-op move
+  const next = list.slice();
+  const [moved] = next.splice(idx, 1);
+  // After splice the indices to the right of `idx` shift left by one — adjust the insert index
+  // accordingly so the user-visible "drop here" lines up with the actual landing position.
+  const insertIdx = idx < clamped ? clamped - 1 : clamped;
+  next.splice(insertIdx, 0, moved);
+  return next;
+}
+
 // ---------------------------------------------------------------------------
 // Filename codec
 // ---------------------------------------------------------------------------

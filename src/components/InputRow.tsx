@@ -7,6 +7,7 @@ import { Field } from './Field';
 import { RegionParamsEditor, TwinOffsetEditor } from './RegionParamsEditor';
 
 const THUMB_SIZE = 48;
+const DRAG_MIME = 'application/x-projection-lab-input-id';
 
 /** Single regional-input card in the sidebar list — collapsed by default, expandable to edit. */
 export function InputRow({
@@ -17,6 +18,7 @@ export function InputRow({
   onUpdate,
   onRemove,
   onReorder,
+  onMoveToIndex,
   onActivate,
 }: {
   input: RegionalInput;
@@ -26,9 +28,14 @@ export function InputRow({
   onUpdate: (patch: Partial<RegionalInput>) => void;
   onRemove: () => void;
   onReorder: (direction: 'up' | 'down') => void;
+  /** Drop handler: place the dragged input at `targetIndex`. */
+  onMoveToIndex: (draggedId: string, targetIndex: number) => void;
   onActivate: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  // Drag state: which edge of this row the cursor is currently over, so we can render an
+  // insertion indicator. Cleared on dragLeave / drop.
+  const [dropEdge, setDropEdge] = useState<'top' | 'bottom' | null>(null);
   const projection = getProjection(input.projectionId);
   const mismatch = aspectMismatch(
     input.image.width / input.image.height,
@@ -37,8 +44,34 @@ export function InputRow({
 
   return (
     <div
-      className={`input-row ${active ? 'input-row--active' : ''} ${input.enabled ? '' : 'input-row--disabled'}`}
+      className={`input-row ${active ? 'input-row--active' : ''} ${input.enabled ? '' : 'input-row--disabled'} ${dropEdge ? `input-row--drop-${dropEdge}` : ''}`}
       onClick={onActivate}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData(DRAG_MIME, input.id);
+        // Plain-text fallback so OS-level drag previews show something legible.
+        e.dataTransfer.setData('text/plain', input.label);
+      }}
+      onDragOver={(e) => {
+        // dataTransfer.types is the only thing exposed during dragover; check for our custom MIME
+        // so a stray file drag from the OS doesn't trigger reorder UI.
+        if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const rect = e.currentTarget.getBoundingClientRect();
+        setDropEdge(e.clientY < rect.top + rect.height / 2 ? 'top' : 'bottom');
+      }}
+      onDragLeave={() => setDropEdge(null)}
+      onDrop={(e) => {
+        const draggedId = e.dataTransfer.getData(DRAG_MIME);
+        const edge = dropEdge;
+        setDropEdge(null);
+        if (!draggedId || draggedId === input.id) return;
+        e.preventDefault();
+        const targetIndex = edge === 'bottom' ? index + 1 : index;
+        onMoveToIndex(draggedId, targetIndex);
+      }}
     >
       <div className="input-row__head">
         <Thumbnail image={input.image} />

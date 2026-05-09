@@ -26,6 +26,7 @@ import {
 import {
   buildDownloadName,
   createInput,
+  moveInputToIndex,
   removeInput,
   reorderInput,
   updateInput,
@@ -373,6 +374,10 @@ function App() {
     setInputs((prev) => reorderInput(prev, id, direction));
   }, []);
 
+  const handleMoveToIndex = useCallback((id: string, targetIndex: number) => {
+    setInputs((prev) => moveInputToIndex(prev, id, targetIndex));
+  }, []);
+
   const handleActivate = useCallback((id: string) => {
     setActiveInputId((cur) => (cur === id ? null : id));
   }, []);
@@ -535,6 +540,7 @@ function App() {
                   onUpdate={(patch) => handleUpdate(input.id, patch)}
                   onRemove={() => handleRemove(input.id)}
                   onReorder={(dir) => handleReorder(input.id, dir)}
+                  onMoveToIndex={handleMoveToIndex}
                   onActivate={() => handleActivate(input.id)}
                 />
               ))}
@@ -780,6 +786,7 @@ function App() {
         open={downloadOpen}
         onClose={() => setDownloadOpen(false)}
         inputs={inputs}
+        composite={composite}
         grid={grid}
         coastlines={coastlines}
         defaultProjection={targetId}
@@ -974,6 +981,7 @@ function DownloadDialog({
   open,
   onClose,
   inputs,
+  composite,
   grid,
   coastlines,
   defaultProjection,
@@ -988,6 +996,9 @@ function DownloadDialog({
   open: boolean;
   onClose: () => void;
   inputs: RegionalInput[];
+  // Already-built preview-resolution composite from App. Used for the in-modal preview thumbnail
+  // so we don't pay the N-input rebuild on every projection / size flip in the dialog.
+  composite: HTMLCanvasElement | null;
   grid: GridOptions;
   coastlines: boolean;
   defaultProjection: ProjectionId;
@@ -1032,12 +1043,58 @@ function DownloadDialog({
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
-  if (!open) return null;
-
   const targetProj = getProjection(proj);
   const aspect = targetProj.defaultAspect;
   const outW = aspect >= 1 ? size : Math.round(size * aspect);
   const outH = aspect >= 1 ? Math.round(size / aspect) : size;
+
+  const dialogRegional = proj === 'lambert';
+  const dialogTwin = proj === 'orthographicTwin' || proj === 'stereographicTwin';
+
+  // Live preview of the download. Re-renders on any setting change so the user sees the actual
+  // output framing before committing — avoids "download → realise wrong projection → re-download".
+  const previewCanvas = useMemo(() => {
+    if (!open || !composite) return null;
+    const previewLong = 320;
+    const pw = aspect >= 1 ? previewLong : Math.round(previewLong * aspect);
+    const ph = aspect >= 1 ? Math.round(previewLong / aspect) : previewLong;
+    try {
+      return convertImage({
+        source: equirectangular,
+        target: targetProj,
+        image: composite,
+        outputWidth: pw,
+        outputHeight: ph,
+        grid,
+        lonShiftDeg: dialogRegional ? 0 : lonShift,
+        latShiftDeg: dialogRegional ? 0 : latShift,
+        regionalCenterLonDeg: regionLon,
+        regionalCenterLatDeg: regionLat,
+        regionalScaleDeg: regionScale,
+        twinOffsetDeg: dialogTwin ? targetTwinOffset : 0,
+        coastlines,
+      });
+    } catch {
+      return null;
+    }
+  }, [
+    open,
+    composite,
+    targetProj,
+    aspect,
+    grid,
+    lonShift,
+    latShift,
+    regionLon,
+    regionLat,
+    regionScale,
+    targetTwinOffset,
+    coastlines,
+    dialogRegional,
+    dialogTwin,
+  ]);
+
+  if (!open) return null;
 
   const handleDownload = async () => {
     setBusy(true);
@@ -1046,8 +1103,6 @@ function DownloadDialog({
       // Re-build the composite at full size for the download — the on-screen one is at preview
       // resolution to keep slider drags responsive, but the download deserves the high-fidelity pass.
       const fullComposite = buildComposite(inputs, COMPOSITE_FULL);
-      const dialogRegional = proj === 'lambert';
-      const dialogTwin = proj === 'orthographicTwin' || proj === 'stereographicTwin';
       const canvas = convertImage({
         source: equirectangular,
         target: targetProj,
@@ -1095,6 +1150,7 @@ function DownloadDialog({
         aria-label="Download map"
       >
         <h2>Download map</h2>
+        <DownloadPreview canvas={previewCanvas} />
         <Field label="Projection">
           <select value={proj} onChange={(e) => setProj(e.target.value as ProjectionId)}>
             {projectionList.map((p) => (
@@ -1125,6 +1181,25 @@ function DownloadDialog({
       </div>
     </div>
   );
+}
+
+/** Mounts a small canvas thumbnail inside the download dialog so the user sees the framing
+ *  before they commit. Re-mounts the canvas DOM node on every change. */
+function DownloadPreview({ canvas }: { canvas: HTMLCanvasElement | null }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    if (canvas) {
+      canvas.style.maxWidth = '100%';
+      canvas.style.maxHeight = '100%';
+      canvas.style.objectFit = 'contain';
+      host.replaceChildren(canvas);
+    } else {
+      host.replaceChildren();
+    }
+  }, [canvas]);
+  return <div className="modal-preview" ref={hostRef} />;
 }
 
 export default App;

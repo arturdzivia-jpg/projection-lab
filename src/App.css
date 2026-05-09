@@ -421,6 +421,20 @@ select:disabled {
   color: var(--text-h);
   font-weight: 500;
 }
+.modal-preview {
+  max-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: repeating-conic-gradient(var(--code-bg) 0% 25%, var(--bg) 0% 50%) 0 0 / 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+  min-height: 120px;
+}
+.modal-preview canvas {
+  display: block;
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -521,9 +535,27 @@ select:disabled {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  cursor: pointer;
+  cursor: grab;
   transition: border-color 0.12s, background 0.12s;
+  position: relative;
 }
+.input-row:active {
+  cursor: grabbing;
+}
+/* Drop indicators: a thin accent-coloured bar across the top or bottom edge so the user can see
+   exactly where the dragged row will land. */
+.input-row--drop-top::before,
+.input-row--drop-bottom::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.input-row--drop-top::before { top: -3px; }
+.input-row--drop-bottom::after { bottom: -3px; }
 .input-row:hover {
   border-color: var(--accent);
 }
