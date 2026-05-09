@@ -2,10 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { Uploader } from './components/Uploader';
 import { GlobeView } from './components/GlobeView';
+import { Field } from './components/Field';
+import { InputRow } from './components/InputRow';
+import {
+  RegionParamsEditor,
+  TwinOffsetEditor,
+} from './components/RegionParamsEditor';
 import { projectionList, getProjection, isRegional, isTwin } from './projections/registry';
 import { equirectangular } from './projections/equirectangular';
-import { regionPresets, matchRegionPreset } from './projections/regionPresets';
-import type { Projection, ProjectionId } from './projections';
+import type { ProjectionId } from './projections';
 import {
   canvasToBlob,
   convertImage,
@@ -13,35 +18,49 @@ import {
   type GridHighlight,
   type GridOptions,
 } from './lib/convert';
-import { aspectMismatch, normalizeAspect, type FitMode } from './lib/normalize';
+import {
+  buildComposite,
+  COMPOSITE_FULL,
+  COMPOSITE_PREVIEW,
+} from './lib/composite';
+import {
+  buildDownloadName,
+  createInput,
+  removeInput,
+  reorderInput,
+  updateInput,
+  type RegionalInput,
+} from './lib/regionalInputs';
+import { clamp, normalizeLon } from './lib/numUtils';
 
-// On-screen previews render at this fixed size (per side). Decoupled from download size — previews
-// only need to look crisp in a ~480 px panel, while downloads go up to the GPU's true cap.
+// On-screen panels render at this fixed size (per long side). Independent of download size — the
+// download path rebuilds the composite at COMPOSITE_FULL for higher fidelity.
 const PREVIEW_SIZE = 1024;
 
 function App() {
-  const [image, setImage] = useState<HTMLImageElement | null>(null);
-  const [filename, setFilename] = useState<string>('');
-  const [sourceId, setSourceId] = useState<ProjectionId>('equirectangular');
+  // Regional inputs — the user assembles their world from these.
+  const [inputs, setInputs] = useState<RegionalInput[]>([]);
+  const [activeInputId, setActiveInputId] = useState<string | null>(null);
+
   const [targetId, setTargetId] = useState<ProjectionId>('mercator');
-  const [fit, setFit] = useState<FitMode>('stretch');
   const [gridEnabled, setGridEnabled] = useState<boolean>(true);
   const [gridSpacing, setGridSpacing] = useState<number>(15);
   const [gridHighlight, setGridHighlight] = useState<GridHighlight>('axes');
+  // Composite-framing controls: rotate the assembled equirectangular world before target conversion.
   const [lonShift, setLonShift] = useState<number>(0); // degrees, [-180, 180]
   const [latShift, setLatShift] = useState<number>(0); // degrees, clamped [-90, 90]
-  // Region (Lambert) parameters — used whenever source or target is 'lambert'.
-  const [regionLon, setRegionLon] = useState<number>(0); // degrees [-180, 180]
-  const [regionLat, setRegionLat] = useState<number>(0); // degrees [-90, 90]
-  const [regionScale, setRegionScale] = useState<number>(60); // angular radius in degrees, [5, 180]
-  // Twin-projection layout offset — shifts the seam between the two hemispheres. Only applied
-  // when source or target is a twin projection; preserved across projection changes.
-  const [twinOffset, setTwinOffset] = useState<number>(0); // degrees [-180, 180]
+  // TARGET regional (Lambert) params — only meaningful when targetId === 'lambert'.
+  const [regionLon, setRegionLon] = useState<number>(0);
+  const [regionLat, setRegionLat] = useState<number>(0);
+  const [regionScale, setRegionScale] = useState<number>(60);
+  // TARGET twin-projection layout offset — only meaningful when target is a twin projection.
+  const [targetTwinOffset, setTargetTwinOffset] = useState<number>(0);
   const [coastlines, setCoastlines] = useState<boolean>(false);
+
   const [error, setError] = useState<string | null>(null);
   const [downloadOpen, setDownloadOpen] = useState<boolean>(false);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
-  const [fullscreen, setFullscreen] = useState<'source' | 'target' | 'globe' | null>(null);
+  const [fullscreen, setFullscreen] = useState<'composite' | 'target' | 'globe' | null>(null);
 
   // Esc exits fullscreen.
   useEffect(() => {
@@ -53,19 +72,20 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [fullscreen]);
 
-  const sourceProjection = getProjection(sourceId);
   const targetProjection = getProjection(targetId);
-  const regionalActive = isRegional(sourceId) || isRegional(targetId);
-  const twinActive = isTwin(sourceId) || isTwin(targetId);
-  // Outline the target region on the source preview when the user is converting INTO a regional
-  // view from a global one. Skipped if source is already regional (the source itself IS the region).
-  const showRegionOutlineOnSource = isRegional(targetId) && !isRegional(sourceId);
-  // When regional is active, the regional centre fully replaces lon/lat shift — pass 0 to the shader.
-  const effLonShift = regionalActive ? 0 : lonShift;
-  const effLatShift = regionalActive ? 0 : latShift;
-  // Twin offset only applies when a twin projection is involved — pass 0 otherwise so a stale
-  // value from a previous twin selection doesn't leak into other projections' renders.
-  const effTwinOffset = twinActive ? twinOffset : 0;
+  const targetRegional = isRegional(targetId);
+  const targetTwin = isTwin(targetId);
+  // Composite framing only applies when the target is global. For Lambert / twin targets the
+  // target's own params (centre, seam) determine the framing — passing a separate lon/lat shift
+  // would double-rotate the world.
+  const effLonShift = targetRegional ? 0 : lonShift;
+  const effLatShift = targetRegional ? 0 : latShift;
+  const effTargetTwinOffset = targetTwin ? targetTwinOffset : 0;
+
+  const activeInput = useMemo(
+    () => (activeInputId ? inputs.find((i) => i.id === activeInputId) ?? null : null),
+    [activeInputId, inputs]
+  );
 
   const maxOutputSize = useMemo(() => getMaxOutputSize(), []);
 
@@ -74,51 +94,61 @@ function App() {
     [gridEnabled, gridSpacing, gridHighlight]
   );
 
-  // Base canvas: input image normalized to source projection's expected aspect. Internal — never displayed directly.
-  const baseCanvas = useMemo<HTMLCanvasElement | null>(() => {
-    if (!image) return null;
-    return normalizeAspect(image, sourceProjection.defaultAspect, fit);
-  }, [image, sourceProjection, fit]);
-
-  // Source preview: same projection round-trip through the shader so the grid can be overlaid.
-  const sourcePreview = useMemo<HTMLCanvasElement | null>(() => {
-    if (!baseCanvas) return null;
+  // Assembled equirectangular world from all inputs. Recomputes when inputs change. Render-only
+  // settings (target, lon/lat shift, grid, coastlines) don't invalidate this — they apply later.
+  const composite = useMemo<HTMLCanvasElement | null>(() => {
+    if (inputs.length === 0) return null;
     try {
-      const aspect = sourceProjection.defaultAspect;
-      const outW = aspect >= 1 ? PREVIEW_SIZE : Math.round(PREVIEW_SIZE * aspect);
-      const outH = aspect >= 1 ? Math.round(PREVIEW_SIZE / aspect) : PREVIEW_SIZE;
+      return buildComposite(inputs, COMPOSITE_PREVIEW);
+    } catch (e) {
+      setError((e as Error).message);
+      return null;
+    }
+  }, [inputs]);
+
+  // Composite preview panel: feed the composite back through the shader as equirectangular →
+  // equirectangular so the grid overlay continues to work via the existing pipeline. Region
+  // outline lights up only when an input row is "active" (clicked / expanded).
+  const compositePreview = useMemo<HTMLCanvasElement | null>(() => {
+    if (!composite) return null;
+    const outW = PREVIEW_SIZE;
+    const outH = PREVIEW_SIZE / 2;
+    try {
+      const showOutline = !!activeInput && activeInput.projectionId === 'lambert';
       return convertImage({
-        source: sourceProjection,
-        target: sourceProjection,
-        image: baseCanvas,
+        source: equirectangular,
+        target: equirectangular,
+        image: composite,
         outputWidth: outW,
         outputHeight: outH,
         grid,
-        lonShiftDeg: effLonShift,
-        latShiftDeg: effLatShift,
-        regionalCenterLonDeg: regionLon,
-        regionalCenterLatDeg: regionLat,
-        regionalScaleDeg: regionScale,
-        twinOffsetDeg: effTwinOffset,
-        coastlines,
-        regionOutline: showRegionOutlineOnSource,
+        // Composite preview shows the world in its raw frame — no shift applied.
+        lonShiftDeg: 0,
+        latShiftDeg: 0,
+        regionalCenterLonDeg: activeInput?.lambert.lon ?? 0,
+        regionalCenterLatDeg: activeInput?.lambert.lat ?? 0,
+        regionalScaleDeg: activeInput?.lambert.scale ?? 90,
+        twinOffsetDeg: 0,
+        coastlines: false,
+        regionOutline: showOutline,
       });
     } catch {
-      return baseCanvas;
+      return composite;
     }
-  }, [baseCanvas, sourceProjection, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, effTwinOffset, coastlines, showRegionOutlineOnSource]);
+  }, [composite, grid, activeInput]);
 
-  // Target canvas: source converted to target projection. Capture error alongside the canvas.
+  // Target panel: composite → user-chosen target. Captures error alongside the canvas so we can
+  // show "GPU clamp"-style messages without losing the rest of the UI.
   const targetResult = useMemo<{ canvas: HTMLCanvasElement | null; error: string | null }>(() => {
-    if (!baseCanvas) return { canvas: null, error: null };
+    if (!composite) return { canvas: null, error: null };
     try {
       const aspect = targetProjection.defaultAspect;
       const outW = aspect >= 1 ? PREVIEW_SIZE : Math.round(PREVIEW_SIZE * aspect);
       const outH = aspect >= 1 ? Math.round(PREVIEW_SIZE / aspect) : PREVIEW_SIZE;
       const canvas = convertImage({
-        source: sourceProjection,
+        source: equirectangular,
         target: targetProjection,
-        image: baseCanvas,
+        image: composite,
         outputWidth: outW,
         outputHeight: outH,
         grid,
@@ -127,29 +157,41 @@ function App() {
         regionalCenterLonDeg: regionLon,
         regionalCenterLatDeg: regionLat,
         regionalScaleDeg: regionScale,
-        twinOffsetDeg: effTwinOffset,
+        twinOffsetDeg: effTargetTwinOffset,
         coastlines,
       });
       return { canvas, error: null };
     } catch (e) {
       return { canvas: null, error: (e as Error).message };
     }
-  }, [baseCanvas, sourceProjection, targetProjection, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, effTwinOffset, coastlines]);
+  }, [
+    composite,
+    targetProjection,
+    grid,
+    effLonShift,
+    effLatShift,
+    regionLon,
+    regionLat,
+    regionScale,
+    effTargetTwinOffset,
+    coastlines,
+  ]);
   const targetCanvas = targetResult.canvas;
 
   useEffect(() => {
     setError(targetResult.error);
   }, [targetResult.error]);
 
-  // Globe always reads an equirectangular texture. If target is already equirectangular, reuse the target canvas.
+  // Globe always reads an equirectangular texture. If target is already equirectangular and no
+  // shift / coastlines are applied, reuse the target canvas directly.
   const globeCanvas = useMemo<HTMLCanvasElement | null>(() => {
-    if (!baseCanvas) return null;
+    if (!composite) return null;
     if (targetId === 'equirectangular' && targetCanvas) return targetCanvas;
     try {
       return convertImage({
-        source: sourceProjection,
+        source: equirectangular,
         target: equirectangular,
-        image: baseCanvas,
+        image: composite,
         outputWidth: PREVIEW_SIZE,
         outputHeight: PREVIEW_SIZE / 2,
         grid,
@@ -158,32 +200,73 @@ function App() {
         regionalCenterLonDeg: regionLon,
         regionalCenterLatDeg: regionLat,
         regionalScaleDeg: regionScale,
-        twinOffsetDeg: effTwinOffset,
+        twinOffsetDeg: effTargetTwinOffset,
         coastlines,
       });
     } catch {
       return null;
     }
-  }, [baseCanvas, sourceProjection, targetId, targetCanvas, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, effTwinOffset, coastlines]);
+  }, [
+    composite,
+    targetId,
+    targetCanvas,
+    grid,
+    effLonShift,
+    effLatShift,
+    regionLon,
+    regionLat,
+    regionScale,
+    effTargetTwinOffset,
+    coastlines,
+  ]);
 
-  const sourceMismatch = image
-    ? aspectMismatch(image.width / image.height, sourceProjection.defaultAspect)
-    : false;
+  const addImages = useCallback(
+    (loaded: { image: HTMLImageElement; filename: string }[]) => {
+      setError(null);
+      setInputs((prev) => [...prev, ...loaded.map(({ image, filename }) => createInput(image, filename))]);
+    },
+    []
+  );
 
-  if (!image) {
+  const handleUpdate = useCallback((id: string, patch: Partial<RegionalInput>) => {
+    setInputs((prev) => updateInput(prev, id, patch));
+  }, []);
+
+  const handleRemove = useCallback(
+    (id: string) => {
+      setInputs((prev) => removeInput(prev, id));
+      setActiveInputId((cur) => (cur === id ? null : cur));
+    },
+    []
+  );
+
+  const handleReorder = useCallback((id: string, direction: 'up' | 'down') => {
+    setInputs((prev) => reorderInput(prev, id, direction));
+  }, []);
+
+  const handleActivate = useCallback((id: string) => {
+    setActiveInputId((cur) => (cur === id ? null : id));
+  }, []);
+
+  const handleClearAll = useCallback(() => {
+    setInputs([]);
+    setActiveInputId(null);
+    setError(null);
+  }, []);
+
+  // Empty state: no inputs yet — show the big drop-zone and skip the panels entirely.
+  if (inputs.length === 0) {
     return (
       <div className="upload-screen">
         <header className="upload-screen__header">
           <h1>Projection Lab</h1>
-          <p>Convert map images between projections.</p>
+          <p>
+            Compose a world from regional drawings. Add one or more PNGs exported from this app —
+            each in its own projection — and the world will be assembled and shown in any target
+            projection you pick.
+          </p>
         </header>
-        <Uploader
-          onImage={(img, name) => {
-            setImage(img);
-            setFilename(name);
-            setError(null);
-          }}
-        />
+        <Uploader onImages={addImages} />
       </div>
     );
   }
@@ -204,26 +287,37 @@ function App() {
         </div>
         {sidebarOpen && (
           <div className="sidebar__body">
-            <Field label="Source projection">
-              <ProjectionPicker value={sourceId} onChange={setSourceId} />
-            </Field>
+            <div className="input-list">
+              <div className="input-list__title">Regions ({inputs.length})</div>
+              {inputs.map((input, idx) => (
+                <InputRow
+                  key={input.id}
+                  input={input}
+                  index={idx}
+                  total={inputs.length}
+                  active={activeInputId === input.id}
+                  onUpdate={(patch) => handleUpdate(input.id, patch)}
+                  onRemove={() => handleRemove(input.id)}
+                  onReorder={(dir) => handleReorder(input.id, dir)}
+                  onActivate={() => handleActivate(input.id)}
+                />
+              ))}
+              <Uploader onImages={addImages} variant="compact" />
+            </div>
+
             <Field label="Target projection">
-              <ProjectionPicker value={targetId} onChange={setTargetId} />
-            </Field>
-            <Field
-              label={`Fit ${sourceMismatch ? '⚠' : ''}`}
-              hint={
-                sourceMismatch
-                  ? `Image is ${image.width}×${image.height}, but ${sourceProjection.label} expects ${sourceProjection.defaultAspect}:1.`
-                  : undefined
-              }
-            >
-              <select value={fit} onChange={(e) => setFit(e.target.value as FitMode)}>
-                <option value="stretch">Stretch</option>
-                <option value="contain">Letterbox (contain)</option>
-                <option value="cover">Crop (cover)</option>
+              <select
+                value={targetId}
+                onChange={(e) => setTargetId(e.target.value as ProjectionId)}
+              >
+                {projectionList.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
               </select>
             </Field>
+
             <Field label="Grid">
               <label className="checkbox">
                 <input
@@ -267,123 +361,19 @@ function App() {
                 <span>Real Earth</span>
               </label>
             </Field>
-            {regionalActive ? (
-              <>
-                <Field label="Region preset">
-                  <select
-                    value={matchRegionPreset(regionLon, regionLat, regionScale)?.id ?? 'custom'}
-                    onChange={(e) => {
-                      const preset = regionPresets.find((p) => p.id === e.target.value);
-                      // "Custom" is a derived state — picking it from the dropdown is a no-op,
-                      // since it just reflects "current values don't match any preset".
-                      if (!preset) return;
-                      setRegionLon(preset.lon);
-                      setRegionLat(preset.lat);
-                      setRegionScale(preset.scale);
-                    }}
-                  >
-                    <option value="custom">Custom</option>
-                    {regionPresets.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field
-                  label="Region center lon"
-                  hint="Where on the globe the regional view is centred"
-                >
-                  <div className="slider-row">
-                    <input
-                      type="number"
-                      min={-180}
-                      max={180}
-                      step={1}
-                      value={Number(regionLon.toFixed(2))}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === '' || v === '-') return;
-                        const n = Number(v);
-                        if (!Number.isFinite(n)) return;
-                        setRegionLon(normalizeLon(n));
-                      }}
-                      className="number-input"
-                    />
-                    <input
-                      type="range"
-                      min={-180}
-                      max={180}
-                      step="any"
-                      value={regionLon}
-                      onChange={(e) => setRegionLon(Number(e.target.value))}
-                      className="slider"
-                    />
-                  </div>
-                </Field>
-                <Field label="Region center lat">
-                  <div className="slider-row">
-                    <input
-                      type="number"
-                      min={-90}
-                      max={90}
-                      step={1}
-                      value={Number(regionLat.toFixed(2))}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === '' || v === '-') return;
-                        const n = Number(v);
-                        if (!Number.isFinite(n)) return;
-                        setRegionLat(clamp(n, -90, 90));
-                      }}
-                      className="number-input"
-                    />
-                    <input
-                      type="range"
-                      min={-90}
-                      max={90}
-                      step="any"
-                      value={regionLat}
-                      onChange={(e) => setRegionLat(Number(e.target.value))}
-                      className="slider"
-                    />
-                  </div>
-                </Field>
-                <Field
-                  label="Region scale"
-                  hint={`${regionScale.toFixed(0)}° angular radius (90° = hemisphere)`}
-                >
-                  <div className="slider-row">
-                    <input
-                      type="number"
-                      min={5}
-                      max={180}
-                      step={1}
-                      value={Number(regionScale.toFixed(0))}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === '') return;
-                        const n = Number(v);
-                        if (!Number.isFinite(n)) return;
-                        setRegionScale(clamp(n, 5, 180));
-                      }}
-                      className="number-input"
-                    />
-                    <input
-                      type="range"
-                      min={5}
-                      max={180}
-                      step={1}
-                      value={regionScale}
-                      onChange={(e) => setRegionScale(Number(e.target.value))}
-                      className="slider"
-                    />
-                  </div>
-                </Field>
-              </>
+
+            {targetRegional ? (
+              <RegionParamsEditor
+                lon={regionLon}
+                lat={regionLat}
+                scale={regionScale}
+                onLon={setRegionLon}
+                onLat={setRegionLat}
+                onScale={setRegionScale}
+              />
             ) : (
               <>
-                <Field label="Center longitude">
+                <Field label="Composite center longitude">
                   <div className="slider-row">
                     <input
                       type="number"
@@ -419,7 +409,7 @@ function App() {
                     </button>
                   </div>
                 </Field>
-                <Field label="Center latitude">
+                <Field label="Composite center latitude">
                   <div className="slider-row">
                     <input
                       type="number"
@@ -457,64 +447,23 @@ function App() {
                 </Field>
               </>
             )}
-            {twinActive && (
-              <Field
-                label="Layout center longitude"
-                hint="Longitude at the seam between the two hemispheres"
-              >
-                <div className="slider-row">
-                  <input
-                    type="number"
-                    min={-180}
-                    max={180}
-                    step={1}
-                    value={Number(twinOffset.toFixed(2))}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === '' || v === '-') return;
-                      const n = Number(v);
-                      if (!Number.isFinite(n)) return;
-                      setTwinOffset(normalizeLon(n));
-                    }}
-                    className="number-input"
-                  />
-                  <input
-                    type="range"
-                    min={-180}
-                    max={180}
-                    step="any"
-                    value={twinOffset}
-                    onChange={(e) => setTwinOffset(Number(e.target.value))}
-                    className="slider"
-                  />
-                  <button
-                    type="button"
-                    className="btn btn--ghost btn--mini"
-                    onClick={() => setTwinOffset(0)}
-                    disabled={twinOffset === 0}
-                  >
-                    Reset
-                  </button>
-                </div>
-              </Field>
+            {targetTwin && (
+              <TwinOffsetEditor value={targetTwinOffset} onChange={setTargetTwinOffset} />
             )}
+
             <div className="sidebar__actions">
               <button
                 className="btn"
                 onClick={() => setDownloadOpen(true)}
-                disabled={!baseCanvas}
+                disabled={!composite}
               >
                 Download…
               </button>
               <button
                 className="btn btn--ghost"
-                onClick={() => {
-                  setImage(null);
-                  setFilename('');
-                  setError(null);
-                }}
+                onClick={handleClearAll}
               >
-                New image
+                Clear all
               </button>
             </div>
           </div>
@@ -526,13 +475,19 @@ function App() {
 
         <div className="panels">
           <Panel
-            id="source"
-            title={`Source · ${sourceProjection.label}`}
-            subtitle={filename}
-            fullscreen={fullscreen === 'source'}
-            onFullscreenToggle={() => setFullscreen(fullscreen === 'source' ? null : 'source')}
+            id="composite"
+            title="Composite · Equirectangular"
+            subtitle={
+              activeInput
+                ? `Highlighting: ${activeInput.label}`
+                : `${inputs.length} region${inputs.length === 1 ? '' : 's'}`
+            }
+            fullscreen={fullscreen === 'composite'}
+            onFullscreenToggle={() =>
+              setFullscreen(fullscreen === 'composite' ? null : 'composite')
+            }
           >
-            <CanvasView canvas={sourcePreview} />
+            <CanvasView canvas={compositePreview} />
           </Panel>
           <Panel
             id="target"
@@ -558,57 +513,20 @@ function App() {
       <DownloadDialog
         open={downloadOpen}
         onClose={() => setDownloadOpen(false)}
-        baseCanvas={baseCanvas}
-        sourceProjection={sourceProjection}
+        inputs={inputs}
         grid={grid}
-        lonShift={effLonShift}
-        latShift={effLatShift}
+        coastlines={coastlines}
+        defaultProjection={targetId}
+        // Target params (used as defaults when the user picks a regional / twin target in the dialog)
         regionLon={regionLon}
         regionLat={regionLat}
         regionScale={regionScale}
-        twinOffset={twinOffset}
-        coastlines={coastlines}
-        filename={filename}
+        targetTwinOffset={targetTwinOffset}
+        lonShift={lonShift}
+        latShift={latShift}
         maxOutputSize={maxOutputSize}
-        defaultProjection={targetId}
       />
     </div>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="field">
-      <span className="field__label">{label}</span>
-      {children}
-      {hint && <span className="field__hint">{hint}</span>}
-    </label>
-  );
-}
-
-function ProjectionPicker({
-  value,
-  onChange,
-}: {
-  value: ProjectionId;
-  onChange: (id: ProjectionId) => void;
-}) {
-  return (
-    <select value={value} onChange={(e) => onChange(e.target.value as ProjectionId)}>
-      {projectionList.map((p) => (
-        <option key={p.id} value={p.id}>
-          {p.label}
-        </option>
-      ))}
-    </select>
   );
 }
 
@@ -700,8 +618,7 @@ function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
     }
   }, [canvas]);
 
-  // Drag = visual pan. Only active when zoomed in (otherwise the canvas already fits the host
-  // and panning would just slide it into the empty checker background).
+  // Drag = visual pan. Only active when zoomed in.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -741,7 +658,7 @@ function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
     };
   }, [applyTransform]);
 
-  // Wheel zoom centred on the cursor. Scale stays in [1, 8]; at 1× translation snaps back to 0.
+  // Wheel zoom centred on the cursor.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -790,35 +707,31 @@ function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
 function DownloadDialog({
   open,
   onClose,
-  baseCanvas,
-  sourceProjection,
+  inputs,
   grid,
-  lonShift,
-  latShift,
+  coastlines,
+  defaultProjection,
   regionLon,
   regionLat,
   regionScale,
-  twinOffset,
-  coastlines,
-  filename,
+  targetTwinOffset,
+  lonShift,
+  latShift,
   maxOutputSize,
-  defaultProjection,
 }: {
   open: boolean;
   onClose: () => void;
-  baseCanvas: HTMLCanvasElement | null;
-  sourceProjection: Projection;
+  inputs: RegionalInput[];
   grid: GridOptions;
-  lonShift: number;
-  latShift: number;
+  coastlines: boolean;
+  defaultProjection: ProjectionId;
   regionLon: number;
   regionLat: number;
   regionScale: number;
-  twinOffset: number;
-  coastlines: boolean;
-  filename: string;
+  targetTwinOffset: number;
+  lonShift: number;
+  latShift: number;
   maxOutputSize: number;
-  defaultProjection: ProjectionId;
 }) {
   const [proj, setProj] = useState<ProjectionId>(defaultProjection);
   const [size, setSize] = useState<number>(2048);
@@ -830,14 +743,12 @@ function DownloadDialog({
     [maxOutputSize]
   );
 
-  // Keep size within the available options.
   useEffect(() => {
     if (!sizeOptions.includes(size)) {
       setSize(sizeOptions[sizeOptions.length - 1] ?? 1024);
     }
   }, [size, sizeOptions]);
 
-  // Reset transient state on each open; sync default projection.
   useEffect(() => {
     if (open) {
       setProj(defaultProjection);
@@ -846,7 +757,6 @@ function DownloadDialog({
     }
   }, [open, defaultProjection]);
 
-  // Close on Escape.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -864,39 +774,41 @@ function DownloadDialog({
   const outH = aspect >= 1 ? Math.round(size / aspect) : size;
 
   const handleDownload = async () => {
-    if (!baseCanvas) return;
     setBusy(true);
     setErr(null);
     try {
-      // For the dialog, the dialog-supplied lon/lat shift values already reflect the regionalActive
-      // override (the parent passed effLonShift/effLatShift). The user may pick a target projection
-      // different from the on-screen target, so re-evaluate whether regional is active for THIS download.
-      const dialogRegionalActive = sourceProjection.id === 'lambert' || targetProj.id === 'lambert';
-      const dialogTwinActive =
-        sourceProjection.id === 'orthographicTwin' ||
-        sourceProjection.id === 'stereographicTwin' ||
-        targetProj.id === 'orthographicTwin' ||
-        targetProj.id === 'stereographicTwin';
+      // Re-build the composite at full size for the download — the on-screen one is at preview
+      // resolution to keep slider drags responsive, but the download deserves the high-fidelity pass.
+      const fullComposite = buildComposite(inputs, COMPOSITE_FULL);
+      const dialogRegional = proj === 'lambert';
+      const dialogTwin = proj === 'orthographicTwin' || proj === 'stereographicTwin';
       const canvas = convertImage({
-        source: sourceProjection,
+        source: equirectangular,
         target: targetProj,
-        image: baseCanvas,
+        image: fullComposite,
         outputWidth: outW,
         outputHeight: outH,
         grid,
-        lonShiftDeg: dialogRegionalActive ? 0 : lonShift,
-        latShiftDeg: dialogRegionalActive ? 0 : latShift,
+        lonShiftDeg: dialogRegional ? 0 : lonShift,
+        latShiftDeg: dialogRegional ? 0 : latShift,
         regionalCenterLonDeg: regionLon,
         regionalCenterLatDeg: regionLat,
         regionalScaleDeg: regionScale,
-        twinOffsetDeg: dialogTwinActive ? twinOffset : 0,
+        twinOffsetDeg: dialogTwin ? targetTwinOffset : 0,
         coastlines,
       });
       const blob = await canvasToBlob(canvas);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = downloadName(filename, proj);
+      // Derive a base name from the first enabled input's label, fall back to "world".
+      const baseName = inputs.find((i) => i.enabled)?.label || inputs[0]?.label || 'world';
+      a.download = buildDownloadName(baseName, proj, {
+        lambert: dialogRegional
+          ? { lon: regionLon, lat: regionLat, scale: regionScale }
+          : undefined,
+        twinOffset: dialogTwin ? targetTwinOffset : undefined,
+      });
       a.click();
       URL.revokeObjectURL(url);
       onClose();
@@ -926,10 +838,7 @@ function DownloadDialog({
             ))}
           </select>
         </Field>
-        <Field
-          label="Size"
-          hint={`Output: ${outW} × ${outH} px`}
-        >
+        <Field label="Size" hint={`Output: ${outW} × ${outH} px`}>
           <select value={size} onChange={(e) => setSize(Number(e.target.value))}>
             {sizeOptions.map((s) => (
               <option key={s} value={s}>
@@ -943,26 +852,13 @@ function DownloadDialog({
           <button className="btn btn--ghost" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button className="btn" onClick={handleDownload} disabled={busy || !baseCanvas}>
+          <button className="btn" onClick={handleDownload} disabled={busy || inputs.length === 0}>
             {busy ? 'Rendering…' : 'Download PNG'}
           </button>
         </div>
       </div>
     </div>
   );
-}
-
-function downloadName(input: string, target: ProjectionId): string {
-  const base = input.replace(/\.[^.]+$/, '') || 'map';
-  return `${base}.${target}.png`;
-}
-
-function normalizeLon(deg: number): number {
-  return (((deg + 180) % 360) + 360) % 360 - 180;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
 }
 
 export default App;
