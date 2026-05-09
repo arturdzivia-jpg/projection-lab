@@ -28,3 +28,7 @@ export function getProjection(id: ProjectionId): Projection {
 export function isRegional(id: ProjectionId): boolean {
   return id === 'lambert';
 }
+
+export function isTwin(id: ProjectionId): boolean {
+  return id === 'orthographicTwin' || id === 'stereographicTwin';
+}

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { Uploader } from './components/Uploader';
 import { GlobeView } from './components/GlobeView';
-import { projectionList, getProjection, isRegional } from './projections/registry';
+import { projectionList, getProjection, isRegional, isTwin } from './projections/registry';
 import { equirectangular } from './projections/equirectangular';
 import type { Projection, ProjectionId } from './projections';
 import {
@@ -33,6 +33,9 @@ function App() {
   const [regionLon, setRegionLon] = useState<number>(0); // degrees [-180, 180]
   const [regionLat, setRegionLat] = useState<number>(0); // degrees [-90, 90]
   const [regionScale, setRegionScale] = useState<number>(60); // angular radius in degrees, [5, 180]
+  // Twin-projection layout offset — shifts the seam between the two hemispheres. Only applied
+  // when source or target is a twin projection; preserved across projection changes.
+  const [twinOffset, setTwinOffset] = useState<number>(0); // degrees [-180, 180]
   const [coastlines, setCoastlines] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [downloadOpen, setDownloadOpen] = useState<boolean>(false);
@@ -52,9 +55,13 @@ function App() {
   const sourceProjection = getProjection(sourceId);
   const targetProjection = getProjection(targetId);
   const regionalActive = isRegional(sourceId) || isRegional(targetId);
+  const twinActive = isTwin(sourceId) || isTwin(targetId);
   // When regional is active, the regional centre fully replaces lon/lat shift — pass 0 to the shader.
   const effLonShift = regionalActive ? 0 : lonShift;
   const effLatShift = regionalActive ? 0 : latShift;
+  // Twin offset only applies when a twin projection is involved — pass 0 otherwise so a stale
+  // value from a previous twin selection doesn't leak into other projections' renders.
+  const effTwinOffset = twinActive ? twinOffset : 0;
 
   const maxOutputSize = useMemo(() => getMaxOutputSize(), []);
 
@@ -88,12 +95,13 @@ function App() {
         regionalCenterLonDeg: regionLon,
         regionalCenterLatDeg: regionLat,
         regionalScaleDeg: regionScale,
+        twinOffsetDeg: effTwinOffset,
         coastlines,
       });
     } catch {
       return baseCanvas;
     }
-  }, [baseCanvas, sourceProjection, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, coastlines]);
+  }, [baseCanvas, sourceProjection, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, effTwinOffset, coastlines]);
 
   // Target canvas: source converted to target projection. Capture error alongside the canvas.
   const targetResult = useMemo<{ canvas: HTMLCanvasElement | null; error: string | null }>(() => {
@@ -114,13 +122,14 @@ function App() {
         regionalCenterLonDeg: regionLon,
         regionalCenterLatDeg: regionLat,
         regionalScaleDeg: regionScale,
+        twinOffsetDeg: effTwinOffset,
         coastlines,
       });
       return { canvas, error: null };
     } catch (e) {
       return { canvas: null, error: (e as Error).message };
     }
-  }, [baseCanvas, sourceProjection, targetProjection, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, coastlines]);
+  }, [baseCanvas, sourceProjection, targetProjection, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, effTwinOffset, coastlines]);
   const targetCanvas = targetResult.canvas;
 
   useEffect(() => {
@@ -144,12 +153,13 @@ function App() {
         regionalCenterLonDeg: regionLon,
         regionalCenterLatDeg: regionLat,
         regionalScaleDeg: regionScale,
+        twinOffsetDeg: effTwinOffset,
         coastlines,
       });
     } catch {
       return null;
     }
-  }, [baseCanvas, sourceProjection, targetId, targetCanvas, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, coastlines]);
+  }, [baseCanvas, sourceProjection, targetId, targetCanvas, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, effTwinOffset, coastlines]);
 
   const sourceMismatch = image
     ? aspectMismatch(image.width / image.height, sourceProjection.defaultAspect)
@@ -421,6 +431,47 @@ function App() {
                 </Field>
               </>
             )}
+            {twinActive && (
+              <Field
+                label="Layout center longitude"
+                hint="Longitude at the seam between the two hemispheres"
+              >
+                <div className="slider-row">
+                  <input
+                    type="number"
+                    min={-180}
+                    max={180}
+                    step={1}
+                    value={Number(twinOffset.toFixed(2))}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '' || v === '-') return;
+                      const n = Number(v);
+                      if (!Number.isFinite(n)) return;
+                      setTwinOffset(normalizeLon(n));
+                    }}
+                    className="number-input"
+                  />
+                  <input
+                    type="range"
+                    min={-180}
+                    max={180}
+                    step="any"
+                    value={twinOffset}
+                    onChange={(e) => setTwinOffset(Number(e.target.value))}
+                    className="slider"
+                  />
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--mini"
+                    onClick={() => setTwinOffset(0)}
+                    disabled={twinOffset === 0}
+                  >
+                    Reset
+                  </button>
+                </div>
+              </Field>
+            )}
             <div className="sidebar__actions">
               <button
                 className="btn"
@@ -489,6 +540,7 @@ function App() {
         regionLon={regionLon}
         regionLat={regionLat}
         regionScale={regionScale}
+        twinOffset={twinOffset}
         coastlines={coastlines}
         filename={filename}
         maxOutputSize={maxOutputSize}
@@ -720,6 +772,7 @@ function DownloadDialog({
   regionLon,
   regionLat,
   regionScale,
+  twinOffset,
   coastlines,
   filename,
   maxOutputSize,
@@ -735,6 +788,7 @@ function DownloadDialog({
   regionLon: number;
   regionLat: number;
   regionScale: number;
+  twinOffset: number;
   coastlines: boolean;
   filename: string;
   maxOutputSize: number;
@@ -792,6 +846,11 @@ function DownloadDialog({
       // override (the parent passed effLonShift/effLatShift). The user may pick a target projection
       // different from the on-screen target, so re-evaluate whether regional is active for THIS download.
       const dialogRegionalActive = sourceProjection.id === 'lambert' || targetProj.id === 'lambert';
+      const dialogTwinActive =
+        sourceProjection.id === 'orthographicTwin' ||
+        sourceProjection.id === 'stereographicTwin' ||
+        targetProj.id === 'orthographicTwin' ||
+        targetProj.id === 'stereographicTwin';
       const canvas = convertImage({
         source: sourceProjection,
         target: targetProj,
@@ -804,6 +863,7 @@ function DownloadDialog({
         regionalCenterLonDeg: regionLon,
         regionalCenterLatDeg: regionLat,
         regionalScaleDeg: regionScale,
+        twinOffsetDeg: dialogTwinActive ? twinOffset : 0,
         coastlines,
       });
       const blob = await canvasToBlob(canvas);

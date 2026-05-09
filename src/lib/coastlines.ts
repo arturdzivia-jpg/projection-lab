@@ -4,6 +4,7 @@ import type { FeatureCollection, Feature, Geometry } from 'geojson';
 import landTopoJson from 'world-atlas/land-110m.json';
 import type { Projection } from '../projections';
 import { lambertParams } from '../projections/lambert';
+import { twinParams } from '../projections/twinParams';
 
 // One polyline = an ordered list of [lon°, lat°] vertices forming a continuous coastline path.
 type Polyline = Array<[number, number]>;
@@ -49,11 +50,13 @@ const pathCache = new Map<string, Path2D>();
  * on every render — drag and slider changes do not invalidate the cache.
  */
 function getCoastlinePath(projection: Projection, width: number, height: number): Path2D {
-  // For parameterised projections (Lambert), include the params so the cache invalidates when the
-  // user moves the regional centre or zoom. For others, the projection id alone uniquely keys the path.
+  // For parameterised projections, include the params so the cache invalidates when the user moves
+  // them. For others, the projection id alone uniquely keys the path.
   const key =
     projection.id === 'lambert'
       ? `lambert/${lambertParams.centerLonDeg}/${lambertParams.centerLatDeg}/${lambertParams.scaleDeg}/${width}x${height}`
+      : projection.id === 'orthographicTwin' || projection.id === 'stereographicTwin'
+      ? `${projection.id}/${twinParams.centerOffsetDeg}/${width}x${height}`
       : `${projection.id}/${width}x${height}`;
   const cached = pathCache.get(key);
   if (cached) return cached;

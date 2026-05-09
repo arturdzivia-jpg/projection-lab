@@ -1,5 +1,6 @@
 import type { Projection } from '../projections';
 import { lambertParams } from '../projections/lambert';
+import { twinParams } from '../projections/twinParams';
 import { drawCoastlines } from './coastlines';
 
 /**
@@ -64,6 +65,9 @@ function buildFragmentShader(source: Projection, target: Projection): string {
     uniform int u_grid;
     uniform float u_gridSpacingDeg;
     uniform int u_gridHighlight;
+    // Twin-projection layout offset. Declared globally so multiple twin variants
+    // (orthographicTwin + stereographicTwin) can share it without redeclaring.
+    uniform float u_twinOffsetRad;
 
     const float PI = 3.14159265358979323846;
     const float HALF_PI = 1.57079632679489661923;
@@ -187,6 +191,8 @@ interface ProgramRecord {
     lambertCenterLon: WebGLUniformLocation | null;
     lambertCenterLat: WebGLUniformLocation | null;
     lambertScale: WebGLUniformLocation | null;
+    // Twin-projection layout offset. null when the program doesn't reference it.
+    twinOffset: WebGLUniformLocation | null;
   };
 }
 
@@ -315,6 +321,7 @@ function getProgram(r: Renderer, source: Projection, target: Projection): Progra
       lambertCenterLon: r.gl.getUniformLocation(program, 'u_lambertCenterLonRad'),
       lambertCenterLat: r.gl.getUniformLocation(program, 'u_lambertCenterLatRad'),
       lambertScale: r.gl.getUniformLocation(program, 'u_lambertScaleRad'),
+      twinOffset: r.gl.getUniformLocation(program, 'u_twinOffsetRad'),
     },
   };
   r.programs.set(key, rec);
@@ -341,6 +348,9 @@ export interface ConvertOptions {
   regionalCenterLonDeg?: number;
   regionalCenterLatDeg?: number;
   regionalScaleDeg?: number;
+  // Twin-projection layout offset (degrees). Rotates both disk centres in lockstep — used
+  // whenever source or target is 'orthographicTwin' or 'stereographicTwin'.
+  twinOffsetDeg?: number;
   // Overlay real Earth coastlines on top of the result. Drawn at true geographic coordinates and
   // therefore unaffected by lonShiftDeg — they sit in the same fixed frame as the grid.
   coastlines?: boolean;
@@ -363,6 +373,7 @@ export function convertImage(opts: ConvertOptions): HTMLCanvasElement {
     regionalCenterLonDeg = 0,
     regionalCenterLatDeg = 0,
     regionalScaleDeg = 90,
+    twinOffsetDeg = 0,
     coastlines = false,
   } = opts;
 
@@ -371,6 +382,7 @@ export function convertImage(opts: ConvertOptions): HTMLCanvasElement {
   lambertParams.centerLonDeg = regionalCenterLonDeg;
   lambertParams.centerLatDeg = regionalCenterLatDeg;
   lambertParams.scaleDeg = regionalScaleDeg;
+  twinParams.centerOffsetDeg = twinOffsetDeg;
 
   const r = getRenderer();
   const { gl } = r;
@@ -435,6 +447,9 @@ export function convertImage(opts: ConvertOptions): HTMLCanvasElement {
   }
   if (rec.uniforms.lambertScale !== null) {
     gl.uniform1f(rec.uniforms.lambertScale, (regionalScaleDeg * Math.PI) / 180);
+  }
+  if (rec.uniforms.twinOffset !== null) {
+    gl.uniform1f(rec.uniforms.twinOffset, (twinOffsetDeg * Math.PI) / 180);
   }
 
   gl.viewport(0, 0, outputWidth, outputHeight);
