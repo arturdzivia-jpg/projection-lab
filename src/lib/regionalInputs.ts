@@ -36,7 +36,14 @@ function genId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Create a fresh input from an uploaded image, auto-detecting projection + params from filename. */
+/**
+ * Create a fresh input from an uploaded image, auto-detecting projection + params from filename.
+ *
+ * When the filename gives no hint we fall back to `equirectangular` — that's the safe "treat the
+ * image as a full world map" default. Picking Lambert + Europe by default would make a globally-
+ * scoped image look like a regional crop, which is the opposite of intuitive. The user can flip
+ * to Lambert / twin / etc. via the projection picker on the row.
+ */
 export function createInput(image: HTMLImageElement, filename: string): RegionalInput {
   const decoded = decodeFilename(filename);
   return {
@@ -45,7 +52,7 @@ export function createInput(image: HTMLImageElement, filename: string): Regional
     filename,
     image,
     enabled: true,
-    projectionId: decoded.projectionId ?? 'lambert',
+    projectionId: decoded.projectionId ?? 'equirectangular',
     fit: 'stretch',
     lambert: decoded.lambert ?? defaultLambertParams(),
     twinOffset: decoded.twinOffset ?? 0,
