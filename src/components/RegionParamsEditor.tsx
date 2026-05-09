@@ -76,6 +76,14 @@ export function RegionParamsEditor({
             onChange={(e) => onLon(Number(e.target.value))}
             className="slider"
           />
+          <button
+            type="button"
+            className="btn btn--ghost btn--mini"
+            onClick={() => onLon(0)}
+            disabled={lon === 0}
+          >
+            Reset
+          </button>
         </div>
       </Field>
       <Field label="Region center lat">
@@ -104,6 +112,14 @@ export function RegionParamsEditor({
             onChange={(e) => onLat(Number(e.target.value))}
             className="slider"
           />
+          <button
+            type="button"
+            className="btn btn--ghost btn--mini"
+            onClick={() => onLat(0)}
+            disabled={lat === 0}
+          >
+            Reset
+          </button>
         </div>
       </Field>
       <Field
@@ -135,6 +151,14 @@ export function RegionParamsEditor({
             onChange={(e) => onScale(Number(e.target.value))}
             className="slider"
           />
+          <button
+            type="button"
+            className="btn btn--ghost btn--mini"
+            onClick={() => onScale(60)}
+            disabled={scale === 60}
+          >
+            Reset
+          </button>
         </div>
       </Field>
     </>
