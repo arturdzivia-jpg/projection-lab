@@ -50,7 +50,17 @@ export function InputRow({
             onChange={(e) => onUpdate({ label: e.target.value })}
             placeholder="Label"
           />
-          <div className="input-row__summary">{summarise(input)}</div>
+          <div className="input-row__summary">
+            {mismatch && (
+              <span
+                className="input-row__warn"
+                title={`Image is ${input.image.width}×${input.image.height}, but ${projection.label} expects ${projection.defaultAspect}:1. Open the row to pick a Fit mode.`}
+              >
+                ⚠
+              </span>
+            )}
+            {summarise(input)}
+          </div>
         </div>
         <div className="input-row__controls" onClick={(e) => e.stopPropagation()}>
           <label

@@ -487,11 +487,20 @@ function App() {
       <div className="upload-screen">
         <header className="upload-screen__header">
           <h1>Projection Lab</h1>
-          <p>
-            Compose a world from regional drawings. Add one or more PNGs exported from this app —
-            each in its own projection — and the world will be assembled and shown in any target
-            projection you pick.
-          </p>
+          <p>Two ways to use this:</p>
+          <ul className="upload-screen__bullets">
+            <li>
+              <strong>Convert one world map.</strong> Drop a single PNG and pick a target projection.
+              The default treats the image as full-world equirectangular — change it on the row if
+              your image is in a different projection.
+            </li>
+            <li>
+              <strong>Compose from regions.</strong> Drop several regional PNGs (e.g. Lambert
+              Europe, Lambert Asia, …); each is reverse-projected and stacked into one world that
+              you can then re-project. PNGs you previously exported from this app round-trip their
+              projection + params via the filename.
+            </li>
+          </ul>
         </header>
         <Uploader onImages={addImages} />
       </div>
@@ -578,14 +587,17 @@ function App() {
                 <option value="axes+circles">Plus tropics & polar circles</option>
               </select>
             </Field>
-            <Field label="Coastlines">
+            <Field
+              label="Coastlines"
+              hint="Overlay real Earth coastlines on the target — useful for sanity-checking where regions land"
+            >
               <label className="checkbox">
                 <input
                   type="checkbox"
                   checked={coastlines}
                   onChange={(e) => setCoastlines(e.target.checked)}
                 />
-                <span>Real Earth</span>
+                <span>Show real Earth</span>
               </label>
             </Field>
 
@@ -600,7 +612,10 @@ function App() {
               />
             ) : (
               <>
-                <Field label="Composite center longitude">
+                <Field
+                  label="Map center longitude"
+                  hint="Rotates the assembled world so this longitude sits at the centre"
+                >
                   <div className="slider-row">
                     <input
                       type="number"
@@ -636,7 +651,7 @@ function App() {
                     </button>
                   </div>
                 </Field>
-                <Field label="Composite center latitude">
+                <Field label="Map center latitude">
                   <div className="slider-row">
                     <input
                       type="number"
