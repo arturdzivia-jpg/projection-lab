@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import './App.css';
 import { Uploader } from './components/Uploader';
 import { GlobeView } from './components/GlobeView';
@@ -43,6 +43,7 @@ import {
   SCHEMA_VERSION_CONST,
   type PersistedState,
 } from './lib/persistence';
+import { exportProject, importProject, projectFilename } from './lib/project';
 import { clamp, normalizeLon } from './lib/numUtils';
 
 // On-screen panels render at this fixed size (per long side). Independent of download size — the
@@ -386,6 +387,94 @@ function App() {
     clearAllPersistence().catch((e) => console.warn('clearAllPersistence failed:', e));
   }, []);
 
+  // Build the current persisted-state snapshot. Used by both export and the auto-save effect, so
+  // they always agree on the schema. Captured by reference via the closure — fine since we only
+  // call it from event handlers, not from a memo.
+  const snapshotState = useCallback(
+    (): PersistedState => ({
+      schemaVersion: SCHEMA_VERSION_CONST,
+      inputs: inputs.map(toPersistedInput),
+      target: {
+        id: targetId,
+        regionLon,
+        regionLat,
+        regionScale,
+        twinOffset: targetTwinOffset,
+        lonShift,
+        latShift,
+      },
+      render: {
+        gridEnabled,
+        gridSpacing,
+        gridHighlight,
+        coastlines,
+      },
+    }),
+    [
+      inputs,
+      targetId,
+      regionLon,
+      regionLat,
+      regionScale,
+      targetTwinOffset,
+      lonShift,
+      latShift,
+      gridEnabled,
+      gridSpacing,
+      gridHighlight,
+      coastlines,
+    ]
+  );
+
+  const handleExportProject = useCallback(async () => {
+    if (inputs.length === 0) return;
+    try {
+      const blob = await exportProject(snapshotState(), inputs);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = projectFilename();
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(`Export failed: ${(e as Error).message}`);
+    }
+  }, [inputs, snapshotState]);
+
+  const projectFileRef = useRef<HTMLInputElement>(null);
+  const handleImportProject = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-picking the same file later
+    if (!file) return;
+    if (!confirm('Importing will replace the current project. Continue?')) return;
+    try {
+      const { state, inputs: imported } = await importProject(file);
+      // Wipe IDB so leftover images from the prior session don't pollute the imported state.
+      await clearAllPersistence();
+      for (const i of imported) {
+        await saveImage(i.id, i.blob);
+      }
+      // Push everything into React state — the debounced auto-save effect will write the JSON
+      // settings record on its next tick.
+      setInputs(imported);
+      setActiveInputId(null);
+      setTargetId(state.target.id);
+      setRegionLon(state.target.regionLon);
+      setRegionLat(state.target.regionLat);
+      setRegionScale(state.target.regionScale);
+      setTargetTwinOffset(state.target.twinOffset);
+      setLonShift(state.target.lonShift);
+      setLatShift(state.target.latShift);
+      setGridEnabled(state.render.gridEnabled);
+      setGridSpacing(state.render.gridSpacing);
+      setGridHighlight(state.render.gridHighlight);
+      setCoastlines(state.render.coastlines);
+      setError(null);
+    } catch (err) {
+      setError(`Import failed: ${(err as Error).message}`);
+    }
+  }, []);
+
   // Hydrating from IndexedDB — render nothing for a frame to avoid flashing the empty-state
   // screen before persisted inputs reappear. The query is fast (~10 ms in the no-data case).
   if (!hydrated) {
@@ -597,6 +686,30 @@ function App() {
               >
                 Download…
               </button>
+              <div className="sidebar__actions-row">
+                <button
+                  className="btn btn--ghost"
+                  onClick={handleExportProject}
+                  disabled={inputs.length === 0}
+                  title="Save the whole project (regions + settings + images) to a single .json file"
+                >
+                  Export project
+                </button>
+                <button
+                  className="btn btn--ghost"
+                  onClick={() => projectFileRef.current?.click()}
+                  title="Replace the current project with one from a .json file"
+                >
+                  Import project
+                </button>
+                <input
+                  ref={projectFileRef}
+                  type="file"
+                  accept="application/json,.json"
+                  hidden
+                  onChange={handleImportProject}
+                />
+              </div>
               <button
                 className="btn btn--ghost"
                 onClick={handleClearAll}

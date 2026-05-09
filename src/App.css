@@ -108,6 +108,15 @@
 .sidebar__actions .btn {
   width: 100%;
 }
+.sidebar__actions-row {
+  display: flex;
+  gap: 6px;
+}
+.sidebar__actions-row .btn {
+  flex: 1 1 0;
+  font-size: 12px;
+  padding: 6px 8px;
+}
 
 /* Field — vertical layout in sidebar */
 .field {
