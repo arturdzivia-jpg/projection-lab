@@ -111,3 +111,111 @@ export function drawCoastlines(
   ctx.stroke(getCoastlinePath(projection, width, height));
   ctx.restore();
 }
+
+const outlineCache = new Map<string, Path2D>();
+
+function normalizeLonRad(lon: number): number {
+  return (((lon + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+}
+
+/**
+ * Build a Path2D outlining the regional small-circle (centre + angular radius) projected through
+ * `projection` into a width×height canvas. Uses the same seam-break heuristic as coastlines so
+ * regions that wrap the dateline render as two arcs instead of a horizontal smear.
+ */
+function getRegionOutlinePath(
+  projection: Projection,
+  width: number,
+  height: number,
+  centerLonDeg: number,
+  centerLatDeg: number,
+  scaleDeg: number
+): Path2D {
+  // Cache key includes any params that change projection.forward(), so e.g. moving the twin
+  // seam invalidates a stale path.
+  let projParams = '';
+  if (projection.id === 'lambert') {
+    projParams = `/${lambertParams.centerLonDeg}/${lambertParams.centerLatDeg}/${lambertParams.scaleDeg}`;
+  } else if (projection.id === 'orthographicTwin' || projection.id === 'stereographicTwin') {
+    projParams = `/${twinParams.centerOffsetDeg}`;
+  }
+  const key = `${projection.id}${projParams}/${centerLonDeg}/${centerLatDeg}/${scaleDeg}/${width}x${height}`;
+  const cached = outlineCache.get(key);
+  if (cached) return cached;
+
+  const path = new Path2D();
+  const lon0 = (centerLonDeg * Math.PI) / 180;
+  const lat0 = (centerLatDeg * Math.PI) / 180;
+  const r = (scaleDeg * Math.PI) / 180;
+  const sinLat0 = Math.sin(lat0);
+  const cosLat0 = Math.cos(lat0);
+  const sinR = Math.sin(r);
+  const cosR = Math.cos(r);
+
+  const N = 720;
+  const seamPx = width * SEAM_FRACTION;
+  let prevX = 0;
+  let started = false;
+
+  for (let i = 0; i <= N; i++) {
+    const theta = (i / N) * 2 * Math.PI;
+    const sinLat = sinLat0 * cosR + cosLat0 * sinR * Math.cos(theta);
+    const lat = Math.asin(Math.max(-1, Math.min(1, sinLat)));
+    // atan2 + lon0 can push lon outside [-π, π]; normalise so equirectangular-style projections
+    // don't map the boundary to u outside [0,1].
+    const lon = normalizeLonRad(
+      lon0 + Math.atan2(Math.sin(theta) * sinR * cosLat0, cosR - sinLat0 * sinLat)
+    );
+    const proj = projection.forward(lon, lat);
+    if (!proj) {
+      started = false;
+      continue;
+    }
+    const x = proj.u * width;
+    const y = proj.v * height;
+    if (!started || Math.abs(x - prevX) > seamPx) {
+      path.moveTo(x, y);
+    } else {
+      path.lineTo(x, y);
+    }
+    prevX = x;
+    started = true;
+  }
+
+  outlineCache.set(key, path);
+  return path;
+}
+
+export function drawRegionOutline(
+  ctx: CanvasRenderingContext2D,
+  projection: Projection,
+  width: number,
+  height: number,
+  centerLonDeg: number,
+  centerLatDeg: number,
+  scaleDeg: number,
+  lineWidthPx = 2
+): void {
+  // At full-sphere extent the boundary collapses to the antipode point — nothing useful to draw.
+  if (scaleDeg >= 180) return;
+  const path = getRegionOutlinePath(
+    projection,
+    width,
+    height,
+    centerLonDeg,
+    centerLatDeg,
+    scaleDeg
+  );
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  // Dark halo first, then a saturated fill on top — keeps the outline legible over both bright
+  // (e.g. equator over snow) and dark (e.g. ocean) source pixels.
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.lineWidth = lineWidthPx + 2;
+  ctx.stroke(path);
+  ctx.strokeStyle = 'rgba(255, 196, 64, 0.95)';
+  ctx.lineWidth = lineWidthPx;
+  ctx.stroke(path);
+  ctx.restore();
+}

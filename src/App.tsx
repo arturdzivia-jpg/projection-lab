@@ -56,6 +56,9 @@ function App() {
   const targetProjection = getProjection(targetId);
   const regionalActive = isRegional(sourceId) || isRegional(targetId);
   const twinActive = isTwin(sourceId) || isTwin(targetId);
+  // Outline the target region on the source preview when the user is converting INTO a regional
+  // view from a global one. Skipped if source is already regional (the source itself IS the region).
+  const showRegionOutlineOnSource = isRegional(targetId) && !isRegional(sourceId);
   // When regional is active, the regional centre fully replaces lon/lat shift — pass 0 to the shader.
   const effLonShift = regionalActive ? 0 : lonShift;
   const effLatShift = regionalActive ? 0 : latShift;
@@ -97,11 +100,12 @@ function App() {
         regionalScaleDeg: regionScale,
         twinOffsetDeg: effTwinOffset,
         coastlines,
+        regionOutline: showRegionOutlineOnSource,
       });
     } catch {
       return baseCanvas;
     }
-  }, [baseCanvas, sourceProjection, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, effTwinOffset, coastlines]);
+  }, [baseCanvas, sourceProjection, grid, effLonShift, effLatShift, regionLon, regionLat, regionScale, effTwinOffset, coastlines, showRegionOutlineOnSource]);
 
   // Target canvas: source converted to target projection. Capture error alongside the canvas.
   const targetResult = useMemo<{ canvas: HTMLCanvasElement | null; error: string | null }>(() => {

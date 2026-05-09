@@ -1,7 +1,7 @@
 import type { Projection } from '../projections';
 import { lambertParams } from '../projections/lambert';
 import { twinParams } from '../projections/twinParams';
-import { drawCoastlines } from './coastlines';
+import { drawCoastlines, drawRegionOutline } from './coastlines';
 
 /**
  * GPU-side projection conversion.
@@ -354,6 +354,10 @@ export interface ConvertOptions {
   // Overlay real Earth coastlines on top of the result. Drawn at true geographic coordinates and
   // therefore unaffected by lonShiftDeg — they sit in the same fixed frame as the grid.
   coastlines?: boolean;
+  // Overlay the regional small-circle outline (centre + angular radius from the regional* params)
+  // on top of the result, projected through `target`. Used on the source preview to show which
+  // patch of the world a regional target is going to capture.
+  regionOutline?: boolean;
 }
 
 /**
@@ -375,6 +379,7 @@ export function convertImage(opts: ConvertOptions): HTMLCanvasElement {
     regionalScaleDeg = 90,
     twinOffsetDeg = 0,
     coastlines = false,
+    regionOutline = false,
   } = opts;
 
   // Sync the CPU-side mutable params used by the projection's forward()/inverse()
@@ -467,6 +472,18 @@ export function convertImage(opts: ConvertOptions): HTMLCanvasElement {
 
   if (coastlines) {
     drawCoastlines(ctx, target, outputWidth, outputHeight);
+  }
+
+  if (regionOutline) {
+    drawRegionOutline(
+      ctx,
+      target,
+      outputWidth,
+      outputHeight,
+      regionalCenterLonDeg,
+      regionalCenterLatDeg,
+      regionalScaleDeg
+    );
   }
 
   return dst;
