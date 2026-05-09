@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react';
 interface LoadedImage {
   image: HTMLImageElement;
   filename: string;
+  blob: Blob;
 }
 
 interface Props {
@@ -39,8 +40,9 @@ export function Uploader({ onImages, variant = 'full' }: Props) {
               const url = URL.createObjectURL(file);
               const img = new Image();
               img.onload = () => {
-                decoded.push({ image: img, filename: file.name });
-                URL.revokeObjectURL(url);
+                decoded.push({ image: img, filename: file.name, blob: file });
+                // Don't revoke the URL — img.src holds it and the browser will need it as long as
+                // the HTMLImageElement is alive (e.g. for the input thumbnail).
                 resolve();
               };
               img.onerror = () => {

@@ -6,12 +6,16 @@ import type { FitMode } from './normalize';
  * One regional drawing the user has fed into the app. The composite stage stitches N of these
  * back into a single equirectangular world via convertImage(input.projection → equirectangular)
  * and source-over compositing in list order (top wins overlap).
+ *
+ * `blob` holds the original file bytes — kept around so we can persist the input to IndexedDB
+ * (HTMLImageElement isn't structured-cloneable) and re-hydrate on the next session.
  */
 export interface RegionalInput {
   id: string;
   label: string;
   filename: string;
   image: HTMLImageElement;
+  blob: Blob;
   enabled: boolean;
   projectionId: ProjectionId;
   fit: FitMode;
@@ -44,13 +48,20 @@ function genId(): string {
  * scoped image look like a regional crop, which is the opposite of intuitive. The user can flip
  * to Lambert / twin / etc. via the projection picker on the row.
  */
-export function createInput(image: HTMLImageElement, filename: string): RegionalInput {
+export function createInput(
+  image: HTMLImageElement,
+  filename: string,
+  blob: Blob,
+  // Optional id — pass when re-hydrating from storage so the same RegionalInput keeps its key.
+  id?: string
+): RegionalInput {
   const decoded = decodeFilename(filename);
   return {
-    id: genId(),
+    id: id ?? genId(),
     label: decoded.base,
     filename,
     image,
+    blob,
     enabled: true,
     projectionId: decoded.projectionId ?? 'equirectangular',
     fit: 'stretch',

@@ -31,6 +31,18 @@ import {
   updateInput,
   type RegionalInput,
 } from './lib/regionalInputs';
+import {
+  blobToImage,
+  clearAllPersistence,
+  deleteImage,
+  loadImage,
+  loadSettings,
+  saveImage,
+  saveSettings,
+  toPersistedInput,
+  SCHEMA_VERSION_CONST,
+  type PersistedState,
+} from './lib/persistence';
 import { clamp, normalizeLon } from './lib/numUtils';
 
 // On-screen panels render at this fixed size (per long side). Independent of download size — the
@@ -61,6 +73,114 @@ function App() {
   const [downloadOpen, setDownloadOpen] = useState<boolean>(false);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [fullscreen, setFullscreen] = useState<'composite' | 'target' | 'globe' | null>(null);
+  // Persistence: while hydrating from IndexedDB we don't render anything (avoids a one-frame flash
+  // of the empty state before the saved inputs reappear). Also gates the auto-save effect so the
+  // first render after mount doesn't immediately overwrite storage with empty initial state.
+  const [hydrated, setHydrated] = useState<boolean>(false);
+
+  // Hydrate from IndexedDB on first mount.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const persisted = await loadSettings();
+        if (cancelled) return;
+        if (!persisted) {
+          setHydrated(true);
+          return;
+        }
+        // Restore each input by reading its blob and decoding it back to an HTMLImageElement.
+        // Inputs whose blob has gone missing are silently dropped — better than crashing.
+        const restored: RegionalInput[] = [];
+        for (const p of persisted.inputs) {
+          const blob = await loadImage(p.id);
+          if (cancelled) return;
+          if (!blob) continue;
+          try {
+            const image = await blobToImage(blob);
+            if (cancelled) return;
+            restored.push({
+              id: p.id,
+              label: p.label,
+              filename: p.filename,
+              image,
+              blob,
+              enabled: p.enabled,
+              projectionId: p.projectionId,
+              fit: p.fit,
+              lambert: { ...p.lambert },
+              twinOffset: p.twinOffset,
+            });
+          } catch {
+            /* decode failed, skip */
+          }
+        }
+        if (cancelled) return;
+        setInputs(restored);
+        setTargetId(persisted.target.id);
+        setRegionLon(persisted.target.regionLon);
+        setRegionLat(persisted.target.regionLat);
+        setRegionScale(persisted.target.regionScale);
+        setTargetTwinOffset(persisted.target.twinOffset);
+        setLonShift(persisted.target.lonShift);
+        setLatShift(persisted.target.latShift);
+        setGridEnabled(persisted.render.gridEnabled);
+        setGridSpacing(persisted.render.gridSpacing);
+        setGridHighlight(persisted.render.gridHighlight);
+        setCoastlines(persisted.render.coastlines);
+      } catch (e) {
+        console.warn('Failed to hydrate from IndexedDB:', e);
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Auto-save settings + per-input metadata to IndexedDB. Image blobs are saved separately at
+  // upload time / deleted at remove time, so this effect only writes the small JSON record.
+  useEffect(() => {
+    if (!hydrated) return;
+    const timer = setTimeout(() => {
+      const state: PersistedState = {
+        schemaVersion: SCHEMA_VERSION_CONST,
+        inputs: inputs.map(toPersistedInput),
+        target: {
+          id: targetId,
+          regionLon,
+          regionLat,
+          regionScale,
+          twinOffset: targetTwinOffset,
+          lonShift,
+          latShift,
+        },
+        render: {
+          gridEnabled,
+          gridSpacing,
+          gridHighlight,
+          coastlines,
+        },
+      };
+      saveSettings(state).catch((e) => console.warn('Autosave failed:', e));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [
+    hydrated,
+    inputs,
+    targetId,
+    regionLon,
+    regionLat,
+    regionScale,
+    targetTwinOffset,
+    lonShift,
+    latShift,
+    gridEnabled,
+    gridSpacing,
+    gridHighlight,
+    coastlines,
+  ]);
 
   // Esc exits fullscreen.
   useEffect(() => {
@@ -221,9 +341,16 @@ function App() {
   ]);
 
   const addImages = useCallback(
-    (loaded: { image: HTMLImageElement; filename: string }[]) => {
+    (loaded: { image: HTMLImageElement; filename: string; blob: Blob }[]) => {
       setError(null);
-      setInputs((prev) => [...prev, ...loaded.map(({ image, filename }) => createInput(image, filename))]);
+      const newInputs = loaded.map(({ image, filename, blob }) =>
+        createInput(image, filename, blob)
+      );
+      setInputs((prev) => [...prev, ...newInputs]);
+      // Persist image bytes immediately (settings record gets the metadata via the debounced save).
+      newInputs.forEach((i) => {
+        saveImage(i.id, i.blob).catch((e) => console.warn('saveImage failed:', e));
+      });
     },
     []
   );
@@ -236,6 +363,7 @@ function App() {
     (id: string) => {
       setInputs((prev) => removeInput(prev, id));
       setActiveInputId((cur) => (cur === id ? null : cur));
+      deleteImage(id).catch((e) => console.warn('deleteImage failed:', e));
     },
     []
   );
@@ -249,10 +377,20 @@ function App() {
   }, []);
 
   const handleClearAll = useCallback(() => {
+    if (!confirm('Clear all regions and reset settings? This will remove the saved project.')) {
+      return;
+    }
     setInputs([]);
     setActiveInputId(null);
     setError(null);
+    clearAllPersistence().catch((e) => console.warn('clearAllPersistence failed:', e));
   }, []);
+
+  // Hydrating from IndexedDB — render nothing for a frame to avoid flashing the empty-state
+  // screen before persisted inputs reappear. The query is fast (~10 ms in the no-data case).
+  if (!hydrated) {
+    return <div className="hydrating" aria-hidden />;
+  }
 
   // Empty state: no inputs yet — show the big drop-zone and skip the panels entirely.
   if (inputs.length === 0) {

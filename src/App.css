@@ -1,3 +1,11 @@
+/* Hydrating: a one-frame placeholder while the IDB read resolves, so the empty state
+   doesn't flash on returning visits. */
+.hydrating {
+  width: 100%;
+  height: 100svh;
+  background: var(--bg);
+}
+
 /* Upload screen (no image yet) */
 .upload-screen {
   max-width: 720px;
