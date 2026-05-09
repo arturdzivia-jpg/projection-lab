@@ -76,17 +76,24 @@ function buildFragmentShader(source: Projection, target: Projection): string {
     ${source.glsl}
     ${source.id === target.id ? '' : target.glsl}
 
+    // fwidth(coordDeg) blows up at projection-domain boundaries (e.g. the disk rims of twin
+    // projections, where the neighbouring fragment fell into the out-of-domain sentinel branch
+    // of inverse()). Without a guard, d/w collapses and the smoothstep saturates to 1, painting
+    // phantom lines along those rims — and those phantom pixels don't move when you change
+    // spacing, so they look exactly like "the old grid persisted".
     float lineMask(float coordDeg, float spacingDeg, float halfWidthPx) {
-      float d = abs(mod(coordDeg + spacingDeg * 0.5, spacingDeg) - spacingDeg * 0.5);
       float w = fwidth(coordDeg);
-      if (w <= 0.0) return 0.0;
+      if (w <= 0.0 || w > spacingDeg * 0.5) return 0.0;
+      float d = abs(mod(coordDeg + spacingDeg * 0.5, spacingDeg) - spacingDeg * 0.5);
       return 1.0 - smoothstep(halfWidthPx, halfWidthPx + 1.0, d / w);
     }
 
     float singleLineMask(float coordDeg, float lineDeg, float halfWidthPx) {
-      float d = abs(coordDeg - lineDeg);
       float w = fwidth(coordDeg);
-      if (w <= 0.0) return 0.0;
+      // 10° is comfortably below the closest pair of highlights we draw (axis 0° vs tropic 23.4°),
+      // so a legitimate near-line pixel never hits this cap.
+      if (w <= 0.0 || w > 10.0) return 0.0;
+      float d = abs(coordDeg - lineDeg);
       return 1.0 - smoothstep(halfWidthPx, halfWidthPx + 1.0, d / w);
     }
 
@@ -111,7 +118,11 @@ function buildFragmentShader(source: Projection, target: Projection): string {
         }
       }
 
-      if (u_grid != 0) {
+      // Out-of-domain pixels (e.g. the gap between twin disks) carry inverse()'s sentinel value,
+      // which is far outside [-π, π] × [-π/2, π/2]. Skip the grid for those — both to keep them
+      // transparent, and to avoid feeding garbage coords into lineMask via fwidth from neighbours.
+      bool inDomain = abs(lonlat.x) <= PI + 1e-3 && abs(lonlat.y) <= HALF_PI + 1e-3;
+      if (u_grid != 0 && inDomain) {
         vec2 lonlatDeg = degrees(lonlat);
 
         float gridLat = lineMask(lonlatDeg.y, u_gridSpacingDeg, 0.5);
