@@ -4,6 +4,7 @@ import { Uploader } from './components/Uploader';
 import { GlobeView } from './components/GlobeView';
 import { projectionList, getProjection, isRegional, isTwin } from './projections/registry';
 import { equirectangular } from './projections/equirectangular';
+import { regionPresets, matchRegionPreset } from './projections/regionPresets';
 import type { Projection, ProjectionId } from './projections';
 import {
   canvasToBlob,
@@ -268,6 +269,27 @@ function App() {
             </Field>
             {regionalActive ? (
               <>
+                <Field label="Region preset">
+                  <select
+                    value={matchRegionPreset(regionLon, regionLat, regionScale)?.id ?? 'custom'}
+                    onChange={(e) => {
+                      const preset = regionPresets.find((p) => p.id === e.target.value);
+                      // "Custom" is a derived state — picking it from the dropdown is a no-op,
+                      // since it just reflects "current values don't match any preset".
+                      if (!preset) return;
+                      setRegionLon(preset.lon);
+                      setRegionLat(preset.lat);
+                      setRegionScale(preset.scale);
+                    }}
+                  >
+                    <option value="custom">Custom</option>
+                    {regionPresets.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
                 <Field
                   label="Region center lon"
                   hint="Where on the globe the regional view is centred"

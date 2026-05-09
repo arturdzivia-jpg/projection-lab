@@ -24,7 +24,7 @@ export const lambertParams = {
 
 export const lambert: Projection = {
   id: 'lambert',
-  label: 'Regional (Lambert)',
+  label: 'Lambert Azimuthal (Equal-Area)',
   defaultAspect: 1,
 
   glsl: `
