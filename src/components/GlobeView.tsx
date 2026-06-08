@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
@@ -6,6 +6,10 @@ interface Props {
   // An equirectangular-projection canvas (2:1). The component wraps it onto a sphere.
   equirectangular: HTMLCanvasElement | null;
 }
+
+const MIN_DISTANCE = 1.6;
+const MAX_DISTANCE = 6;
+const INITIAL_DISTANCE = 3;
 
 export function GlobeView({ equirectangular }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -28,17 +32,22 @@ export function GlobeView({ equirectangular }: Props) {
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Prevent iOS Safari from intercepting two-finger gestures for page pinch-zoom — without this
+    // the OS swallows the pinch before OrbitControls sees it.
+    renderer.domElement.style.touchAction = 'none';
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
-    camera.position.set(0, 0, 3);
+    camera.position.set(0, 0, INITIAL_DISTANCE);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = 1.6;
-    controls.maxDistance = 6;
+    controls.minDistance = MIN_DISTANCE;
+    controls.maxDistance = MAX_DISTANCE;
+    // One finger rotates, two fingers pinch-zoom (dolly). Pan is disabled above.
+    controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
 
     const geometry = new THREE.SphereGeometry(1, 64, 32);
     const material = new THREE.MeshBasicMaterial({ color: 0x222222 });
@@ -114,5 +123,59 @@ export function GlobeView({ equirectangular }: Props) {
     }
   }, [equirectangular]);
 
-  return <div ref={containerRef} className="globe-view" />;
+  const zoomBy = useCallback((factor: number) => {
+    const state = stateRef.current;
+    if (!state) return;
+    const { camera, controls } = state;
+    const offset = new THREE.Vector3().subVectors(camera.position, controls.target);
+    const dist = offset.length();
+    const next = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, dist * factor));
+    if (next === dist) return;
+    offset.setLength(next);
+    camera.position.copy(controls.target).add(offset);
+    controls.update();
+  }, []);
+
+  const resetZoom = useCallback(() => {
+    const state = stateRef.current;
+    if (!state) return;
+    const { camera, controls } = state;
+    controls.target.set(0, 0, 0);
+    camera.position.set(0, 0, INITIAL_DISTANCE);
+    controls.update();
+  }, []);
+
+  return (
+    <div ref={containerRef} className="globe-view">
+      <div className="zoom-controls" aria-label="Globe zoom controls">
+        <button
+          type="button"
+          className="zoom-btn"
+          aria-label="Zoom in"
+          title="Zoom in"
+          onClick={() => zoomBy(1 / 1.25)}
+        >
+          +
+        </button>
+        <button
+          type="button"
+          className="zoom-btn"
+          aria-label="Zoom out"
+          title="Zoom out"
+          onClick={() => zoomBy(1.25)}
+        >
+          −
+        </button>
+        <button
+          type="button"
+          className="zoom-btn"
+          aria-label="Reset view"
+          title="Reset view"
+          onClick={resetZoom}
+        >
+          ⤾
+        </button>
+      </div>
+    </div>
+  );
 }

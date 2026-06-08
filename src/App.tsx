@@ -850,8 +850,8 @@ function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
   const scaleRef = useRef(1);
   const txRef = useRef(0);
   const tyRef = useRef(0);
+  const [zoomed, setZoomed] = useState(false);
 
-  // Clamp tx/ty so the canvas always covers the host (you can't drag the content fully off-screen).
   const clampPan = useCallback(() => {
     const c = canvasRef.current;
     const host = hostRef.current;
@@ -869,16 +869,49 @@ function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
     if (c) {
       c.style.transform = `translate(${txRef.current}px, ${tyRef.current}px) scale(${scaleRef.current})`;
     }
-    const host = hostRef.current;
-    if (host) {
-      host.classList.toggle('canvas-host--zoomed', scaleRef.current > 1);
-    }
+    setZoomed(scaleRef.current > 1);
   }, [clampPan]);
+
+  // Zoom by `factor` around a screen-space anchor (defaults to host centre — used by buttons).
+  const zoomBy = useCallback(
+    (factor: number, anchorClientX?: number, anchorClientY?: number) => {
+      const host = hostRef.current;
+      if (!host) return;
+      const rect = host.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const ax = anchorClientX ?? cx;
+      const ay = anchorClientY ?? cy;
+      const oldS = scaleRef.current;
+      const newS = Math.max(1, Math.min(8, oldS * factor));
+      if (newS === oldS) return;
+      const r = newS / oldS;
+      txRef.current = (ax - cx) * (1 - r) + txRef.current * r;
+      tyRef.current = (ay - cy) * (1 - r) + tyRef.current * r;
+      if (newS === 1) {
+        txRef.current = 0;
+        tyRef.current = 0;
+      }
+      scaleRef.current = newS;
+      applyTransform();
+    },
+    [applyTransform]
+  );
+
+  const resetZoom = useCallback(() => {
+    if (scaleRef.current === 1 && txRef.current === 0 && tyRef.current === 0) return;
+    scaleRef.current = 1;
+    txRef.current = 0;
+    tyRef.current = 0;
+    applyTransform();
+  }, [applyTransform]);
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    host.replaceChildren();
+    // Preserve the zoom controls overlay; only swap the canvas child.
+    const prev = canvasRef.current;
+    if (prev && prev.parentNode === host) host.removeChild(prev);
     canvasRef.current = canvas;
     if (canvas) {
       canvas.style.maxWidth = '100%';
@@ -886,50 +919,84 @@ function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
       canvas.style.objectFit = 'contain';
       canvas.style.transformOrigin = '50% 50%';
       canvas.style.transform = `translate(${txRef.current}px, ${tyRef.current}px) scale(${scaleRef.current})`;
-      host.appendChild(canvas);
-      host.classList.toggle('canvas-host--zoomed', scaleRef.current > 1);
+      // Insert before any sibling controls so they overlay it.
+      host.insertBefore(canvas, host.firstChild);
     }
   }, [canvas]);
 
-  // Drag = visual pan. Only active when zoomed in.
+  // Pointer events handle mouse drag, touch pan, and two-finger pinch in one place — so iPad/touch
+  // gets pinch-zoom for free alongside the mouse interactions.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
-    let dragging = false;
-    let lastX = 0;
-    let lastY = 0;
+    const pointers = new Map<number, { x: number; y: number }>();
+    let pinch: { dist: number; cx: number; cy: number } | null = null;
 
-    const onDown = (e: MouseEvent) => {
-      if (scaleRef.current <= 1) return;
-      dragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      host.classList.add('canvas-host--grabbing');
+    const isControl = (target: EventTarget | null) =>
+      target instanceof Element && target.closest('.zoom-controls') !== null;
+
+    const onDown = (e: PointerEvent) => {
+      if (isControl(e.target)) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      host.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 2) {
+        const [a, b] = Array.from(pointers.values());
+        pinch = {
+          dist: Math.hypot(a.x - b.x, a.y - b.y),
+          cx: (a.x + b.x) / 2,
+          cy: (a.y + b.y) / 2,
+        };
+      } else if (scaleRef.current > 1 && pointers.size === 1) {
+        host.classList.add('canvas-host--grabbing');
+      }
       e.preventDefault();
     };
-    const onMove = (e: MouseEvent) => {
-      if (!dragging) return;
-      txRef.current += e.clientX - lastX;
-      tyRef.current += e.clientY - lastY;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      applyTransform();
-    };
-    const onUp = () => {
-      if (dragging) host.classList.remove('canvas-host--grabbing');
-      dragging = false;
+
+    const onMove = (e: PointerEvent) => {
+      const prev = pointers.get(e.pointerId);
+      if (!prev) return;
+      const next = { x: e.clientX, y: e.clientY };
+      pointers.set(e.pointerId, next);
+
+      if (pointers.size === 2 && pinch) {
+        const [a, b] = Array.from(pointers.values());
+        const newDist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinch.dist > 0) {
+          zoomBy(newDist / pinch.dist, pinch.cx, pinch.cy);
+        }
+        pinch.dist = newDist;
+        pinch.cx = (a.x + b.x) / 2;
+        pinch.cy = (a.y + b.y) / 2;
+        return;
+      }
+
+      if (pointers.size === 1 && scaleRef.current > 1) {
+        txRef.current += next.x - prev.x;
+        tyRef.current += next.y - prev.y;
+        applyTransform();
+      }
     };
 
-    host.addEventListener('mousedown', onDown);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      host.removeEventListener('mousedown', onDown);
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+    const onUp = (e: PointerEvent) => {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinch = null;
+      if (pointers.size === 0) host.classList.remove('canvas-host--grabbing');
+      if (host.hasPointerCapture(e.pointerId)) host.releasePointerCapture(e.pointerId);
     };
-  }, [applyTransform]);
+
+    host.addEventListener('pointerdown', onDown);
+    host.addEventListener('pointermove', onMove);
+    host.addEventListener('pointerup', onUp);
+    host.addEventListener('pointercancel', onUp);
+    return () => {
+      host.removeEventListener('pointerdown', onDown);
+      host.removeEventListener('pointermove', onMove);
+      host.removeEventListener('pointerup', onUp);
+      host.removeEventListener('pointercancel', onUp);
+    };
+  }, [applyTransform, zoomBy]);
 
   // Wheel zoom centred on the cursor.
   useEffect(() => {
@@ -937,26 +1004,12 @@ function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
     if (!host) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const rect = host.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      const oldS = scaleRef.current;
       const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-      const newS = Math.max(1, Math.min(8, oldS * factor));
-      if (newS === oldS) return;
-      const r = newS / oldS;
-      txRef.current = (e.clientX - cx) * (1 - r) + txRef.current * r;
-      tyRef.current = (e.clientY - cy) * (1 - r) + tyRef.current * r;
-      if (newS === 1) {
-        txRef.current = 0;
-        tyRef.current = 0;
-      }
-      scaleRef.current = newS;
-      applyTransform();
+      zoomBy(factor, e.clientX, e.clientY);
     };
     host.addEventListener('wheel', onWheel, { passive: false });
     return () => host.removeEventListener('wheel', onWheel);
-  }, [applyTransform]);
+  }, [zoomBy]);
 
   // Double-click resets zoom and pan.
   useEffect(() => {
@@ -965,16 +1018,49 @@ function CanvasView({ canvas }: { canvas: HTMLCanvasElement | null }) {
     const onDbl = (e: MouseEvent) => {
       if (scaleRef.current === 1 && txRef.current === 0 && tyRef.current === 0) return;
       e.preventDefault();
-      scaleRef.current = 1;
-      txRef.current = 0;
-      tyRef.current = 0;
-      applyTransform();
+      resetZoom();
     };
     host.addEventListener('dblclick', onDbl);
     return () => host.removeEventListener('dblclick', onDbl);
-  }, [applyTransform]);
+  }, [resetZoom]);
 
-  return <div className="canvas-host" ref={hostRef} />;
+  return (
+    <div className={`canvas-host ${zoomed ? 'canvas-host--zoomed' : ''}`} ref={hostRef}>
+      {canvas && (
+        <div className="zoom-controls" aria-label="Zoom controls">
+          <button
+            type="button"
+            className="zoom-btn"
+            aria-label="Zoom in"
+            title="Zoom in"
+            onClick={() => zoomBy(1.4)}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className="zoom-btn"
+            aria-label="Zoom out"
+            title="Zoom out"
+            onClick={() => zoomBy(1 / 1.4)}
+            disabled={!zoomed}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            className="zoom-btn"
+            aria-label="Reset zoom"
+            title="Reset zoom"
+            onClick={resetZoom}
+            disabled={!zoomed}
+          >
+            ⤾
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function DownloadDialog({
